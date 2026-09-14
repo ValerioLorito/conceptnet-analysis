@@ -1,0 +1,19 @@
+services:
+  mysql-benchmark:
+    image: mysql:8.0
+    container_name: mysql-conceptnet
+    environment:
+      # Impostiamo la password di root e creiamo il DB in automatico all'avvio
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: conceptnet_db
+    ports:
+    # Mappiamo la porta standard di MySQL sul tuo Mac
+    - "3306:3306"
+    volumes:
+    # IL PONTE FONDAMENTALE:
+    # Collega la cartella del tuo Mac (dove hai generato i 3 .csv)
+    # alla cartella sicura interna di MySQL.
+    - /Users/macos/Desktop/DM_PROJECT:/var/lib/mysql-files
+    command:
+    # Disabilitiamo alcune restrizioni per velocizzare i test locali
+    - --local-infile=1
