@@ -13,7 +13,7 @@ services:
     # IL PONTE FONDAMENTALE:
     # Collega la cartella del tuo Mac (dove hai generato i 3 .csv)
     # alla cartella sicura interna di MySQL.
-    - /Users/macos/Desktop/conceptnet-analysis:/var/lib/mysql-files
+    - /Users/macos/Desktop/conceptnet-analysis/csv-files:/var/lib/mysql-files
     command:
     # Disabilitiamo alcune restrizioni per velocizzare i test locali
     - --local-infile=1

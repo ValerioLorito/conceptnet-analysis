@@ -35,8 +35,8 @@ from collections import defaultdict
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError
 
-NODES_FILE = "data/preprocessed/conceptnet_science_2hop_concepts.csv"
-EDGES_FILE = "data/preprocessed/conceptnet_science_2hop.csv"
+NODES_FILE = "data/preprocessed/typed_nodes.csv"
+EDGES_FILE = "data/preprocessed/typed_edges.csv"
 
 MEMGRAPH_URI  = "bolt://localhost:7687"
 MEMGRAPH_AUTH = ("", "")

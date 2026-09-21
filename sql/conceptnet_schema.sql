@@ -190,21 +190,27 @@ WHERE rec.edge_class <> 'ALL';
 -- ---------------------------------------------------------------------------
 CREATE TABLE nodes (
     node_id      INT          NOT NULL,
-    uri          VARCHAR(255) NOT NULL,
-    name         VARCHAR(255) NOT NULL,          -- surface term, NOT unique
+    -- Exact-match collation: ConceptNet identity is byte-level. The database
+    -- default (utf8mb4_unicode_ci) is case- AND accent-insensitive, so it
+    -- folds '/c/en/oogenetic' = '/c/en/oögenetic' and the unique key rejects
+    -- one of them (error 1062). With utf8mb4_bin, DB equality is identical
+    -- to Python string equality, so the loader's preflight dedup becomes a
+    -- complete guarantee. (utf8mb4_0900_as_cs is an acceptable MySQL 8.0
+    -- alternative if you want linguistically sensible ORDER BY on these
+    -- columns; MariaDB users should stay on utf8mb4_bin.)
+    uri          VARCHAR(255) COLLATE utf8mb4_bin NOT NULL,
+    name         VARCHAR(255) COLLATE utf8mb4_bin NOT NULL,
     pos          CHAR(1)      NOT NULL,          -- n | v | a | r | s
     node_type    VARCHAR(16)  NOT NULL,
     label_source VARCHAR(20)  NOT NULL,
     PRIMARY KEY (node_id),
     UNIQUE KEY uq_nodes_uri (uri),
-    UNIQUE KEY uq_nodes_id_type (node_id, node_type),  -- FK target for edges
+    UNIQUE KEY uq_nodes_id_type (node_id, node_type),
     KEY idx_nodes_name (name),
     KEY idx_nodes_type (node_type),
     KEY idx_nodes_source (label_source),
     CONSTRAINT fk_nodes_type   FOREIGN KEY (node_type)    REFERENCES node_types (node_type),
     CONSTRAINT fk_nodes_source FOREIGN KEY (label_source) REFERENCES label_sources (label_source),
-    -- The project's core typing rule, enforced by the engine (the SQL image
-    -- of CONCEPTNET_POS_TO_NODE_TYPE in label_concepts.py):
     CONSTRAINT chk_nodes_pos_type CHECK (
         (pos = 'n' AND node_type = 'EntityNode') OR
         (pos = 'v' AND node_type = 'ActionEventNode') OR

@@ -70,14 +70,14 @@ except ImportError:
 
 # --- Configuration (mirror of build_memgraph.py's constants block) --------
 
-NODES_FILE = "data/preprocessed/conceptnet_science_2hop_concepts.csv"
-EDGES_FILE = "data/preprocessed/conceptnet_science_2hop.csv"
+NODES_FILE = "data/preprocessed/typed_nodes.csv"
+EDGES_FILE = "data/preprocessed/typed_edges.csv"
 
 MYSQL_CONFIG = {
     "host":     os.environ.get("MYSQL_HOST", "localhost"),
     "port":     int(os.environ.get("MYSQL_PORT", "3306")),
     "user":     os.environ.get("MYSQL_USER", "root"),
-    "password": os.environ.get("MYSQL_PASSWORD", ""),
+    "password": os.environ.get("MYSQL_PASSWORD", "rootpassword"),
     "database": "conceptnet",
     "charset":  "utf8mb4",
     "autocommit": False,
@@ -118,22 +118,25 @@ def read_csv(path):
         return list(csv.DictReader(f))
 
 
-def insert_rows(cursor, table, columns, rows, suffix=""):
+def insert_rows(cursor, table, columns, rows, suffix="", table_alias=None):
     """
     Parameterized multi-row INSERT, built explicitly.
 
     Why not cursor.executemany(): the connector accelerates executemany only
     for plain `INSERT ... VALUES` statements (regex-based rewrite), and its
-    behaviour once an ON DUPLICATE KEY UPDATE clause — especially the
-    MySQL 8.0.19+ row-alias form `... AS new ON DUPLICATE ...` — is in the
-    clause varies across connector versions. Building the statement by hand
-    keeps the batching identical everywhere. Statement size is roughly
-    rows x row width; tune BATCH_SIZE if needed.
+    behaviour with an ON DUPLICATE KEY UPDATE clause — especially the
+    MySQL 8.0.19+ row-alias form — varies across connector versions.
+
+    `table_alias` exists for the row-alias ODKU dialect: with `... AS new`
+    declared, every column reference inside the ODKU clause must be
+    qualified, because an unqualified name that exists both on the table
+    and on the row alias is ambiguous (error 1052).
     """
     if not rows:
         return
+    target = f"{table} AS {table_alias}" if table_alias else table
     tuple_ph = "(" + ", ".join(["%s"] * len(columns)) + ")"
-    sql = (f"INSERT INTO {table} ({', '.join(columns)}) "
+    sql = (f"INSERT INTO {target} ({', '.join(columns)}) "
            f"VALUES {', '.join([tuple_ph] * len(rows))}{suffix}")
     params = [v for row in rows for v in row]
     cursor.execute(sql, params)
@@ -172,6 +175,33 @@ def supports_row_alias(version_str):
         return True
     return (major, minor) == (8, 0) and patch >= 19
 
+EXACT_COLLATIONS = {"utf8mb4_bin", "utf8mb4_0900_as_cs"}
+
+def check_collation(cursor):
+    """Abort early if nodes.uri/name can fold distinct URIs together."""
+    cursor.execute("""
+        SELECT column_name, collation_name
+        FROM information_schema.columns
+        WHERE table_schema = %s AND table_name = 'nodes'
+          AND column_name IN ('uri', 'name')
+    """, (MYSQL_CONFIG["database"],))
+    found = {col: coll for col, coll in cursor.fetchall()}
+    if len(found) != 2:
+        raise SystemExit(f"preflight: could not read nodes.uri/name "
+                         f"collations (got {found})")
+    bad = {c: coll for c, coll in found.items()
+           if coll not in EXACT_COLLATIONS}
+    if bad:
+        raise SystemExit(
+            f"nodes.uri / nodes.name use a non-exact collation: {bad}\n"
+            "A case/accent-insensitive collation conflates distinct ConceptNet "
+            "URIs (e.g. /c/en/oogenetic vs /c/en/oögenetic); the unique key "
+            "then rejects one of them (error 1062).\n"
+            "Fix, then re-run:\n"
+            "  ALTER TABLE nodes\n"
+            "    MODIFY uri  VARCHAR(255) COLLATE utf8mb4_bin NOT NULL,\n"
+            "    MODIFY name VARCHAR(255) COLLATE utf8mb4_bin NOT NULL;")
+    print(f"  collation ok: uri={found['uri']}, name={found['name']}")
 
 def sync_check(cursor):
     """Assert relation_edge_classes == label_concepts.RELATION_TO_EDGE_CLASSES."""
@@ -372,26 +402,46 @@ def load_nodes(conn, cursor, node_rows):
 
 
 def load_edges(conn, cursor, edges, row_alias):
-    # The duplicate-triple rule, in the dialect the server supports.
+    """
+    The duplicate-triple rule, in the dialect the server supports.
+
+    Row-alias dialect (MySQL >= 8.0.19): with `... AS new` in place, MySQL
+    resolves ODKU references against BOTH the target table and the row
+    alias, so bare `weight` is ambiguous (error 1052). Every reference is
+    qualified — `e.weight` = the stored row, `new.weight` = the incoming
+    row — and the target table gets an alias for that. This is the shape
+    documented in the manual:
+
+        INSERT INTO t AS t1 (a, b) VALUES (...) AS new
+          ON DUPLICATE KEY UPDATE t1.a = new.a;
+
+    Legacy dialect (MariaDB, MySQL < 8.0.19): VALUES(col) is the only form;
+    with no row alias there is a single namespace, so unqualified `weight`
+    is fine there.
+    """
     if row_alias:
+        table_alias = None
         suffix = (" AS new ON DUPLICATE KEY UPDATE "
-                  "weight = GREATEST(weight, new.weight)")
+                "edges.weight = GREATEST(edges.weight, new.weight)")
     else:
+        table_alias = None
         suffix = (" ON DUPLICATE KEY UPDATE "
-                  "weight = GREATEST(weight, VALUES(weight))")
+                "weight = GREATEST(weight, VALUES(weight))")
 
     by_rel = defaultdict(list)
-    for e in edges:
-        by_rel[e["relation"]].append(e)
+    for edge in edges:
+        by_rel[edge["relation"]].append(edge)
 
     t_total = time.time()
     for rel in sorted(by_rel):
-        rows = [(e["subject_id"], e["subject_type"], e["object_id"],
-                 e["object_type"], e["relation_id"], e["edge_class"],
-                 e["weight"]) for e in by_rel[rel]]
+        rows = [(edge["subject_id"], edge["subject_type"],
+                 edge["object_id"], edge["object_type"],
+                 edge["relation_id"], edge["edge_class"], edge["weight"])
+                for edge in by_rel[rel]]
         t0 = time.time()
         for batch in chunks(rows, BATCH_SIZE):
-            insert_rows(cursor, "edges", EDGE_COLUMNS, batch, suffix)
+            insert_rows(cursor, "edges", EDGE_COLUMNS, batch, suffix,
+                        table_alias=table_alias)
             conn.commit()
         print(f"  {rel:<28} {len(rows):>9,} edges  "
               f"({time.time() - t0:.1f}s)")
@@ -517,6 +567,8 @@ def main():
         print("  duplicate handling: "
               + ("row alias 'AS new' (MySQL >= 8.0.19)" if row_alias
                  else "VALUES() (legacy form)"))
+        check_collation(cursor)        
+        sync_check(cursor)
         sync_check(cursor)
         rel2id, sources = fetch_reference_sets(cursor)
 
