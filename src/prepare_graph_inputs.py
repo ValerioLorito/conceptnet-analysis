@@ -187,10 +187,16 @@ def main():
           f"{sum(unknown_rel.values()):,} (unknown relation)")
     print(f"  contract violations kept + flagged: {sum(violations.values()):,}")
 
-    funnel.update({"edges_raw": len(edges), "edges_kept": kept,
-                   "edges_dropped_endpoint": dropped_endpoint,
-                   "edges_dropped_unknown_relation": dict(unknown_rel),
-                   "contract_violations": dict(violations)})
+    report = dict(funnel)
+    report.update({
+        "edges_raw": len(edges),
+        "edges_kept": kept,
+        "edges_dropped_endpoint": dropped_endpoint,
+        "edges_dropped_unknown_relation": dict(unknown_rel),
+        "contract_violations": dict(violations)
+    })
+
+
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(funnel, f, indent=2)
     print(f"Wrote funnel report -> {report_path}")
