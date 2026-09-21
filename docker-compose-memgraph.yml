@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  memgraph:
+    image: memgraph/memgraph-mage:latest
+    container_name: memgraph-mage
+    command: /usr/lib/memgraph/memgraph --log-level=TRACE
+    ports:
+      - "7444:7444"
+      - "7687:7687"
+    environment:
+      BUILD_TYPE: RelWithDebInfo
+      PY_VERSION: "3.12"
+      MEMGRAPH_REF: v3.11.0-rc4
+      LD_LIBRARY_PATH: /usr/lib/memgraph/query_modules
+      MEMGRAPH_TELEMETRY_ID: DOCKER
+    networks:
+      - memgraph-platform_default
+    labels:
+      com.docker.compose.project: memgraph-platform
+      com.docker.compose.version: "5.2.0"
+
+  lab:
+    image: memgraph/lab:latest
+    container_name: memgraph-lab
+    command: node dist-backend/index.js
+    ports:
+      - "3000:3000"
+    environment:
+      QUICK_CONNECT_MG_HOST: memgraph
+      QUICK_CONNECT_MG_PORT: "7687"
+    depends_on:
+      memgraph:
+        condition: service_started
+    networks:
+      - memgraph-platform_default
+    labels:
+      com.docker.compose.project: memgraph-platform
+      com.docker.compose.version: "5.2.0"
+
+networks:
+  memgraph-platform_default:
+    driver: bridge
