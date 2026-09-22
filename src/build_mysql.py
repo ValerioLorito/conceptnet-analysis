@@ -2,7 +2,7 @@
 """
 build_mysql.py — load the typed ConceptNet subgraph into MySQL.
 
-Counterpart of build_memgraph.py; consumes the SAME two files produced by
+Twin loader of build_memgraph.py; consumes the SAME two files produced by
 label_concepts.py:
 
     typed_nodes.csv   uri, name, pos, node_type, label_source
@@ -20,8 +20,17 @@ Identity rules — mirrored exactly by build_memgraph.py's MERGE clauses:
     node = uri
     edge = (subject, relation, object); a duplicate triple keeps the max
     weight, via INSERT ... ON DUPLICATE KEY UPDATE weight = GREATEST(...)
-    (the SQL image of the Cypher MERGE ... ON MATCH SET rule). Both loaders
-    parse the same CSV weight strings, so stored weights are identical.
+    (the SQL image of the Cypher MERGE ... ON MATCH SET rule). Both
+    loaders parse the same CSV weight strings, so stored weights are
+    identical.
+
+A priori contract (STRICT_CONTRACT = True):
+    only edges whose realized class is permitted for their relation — the
+    CSV `permitted` column, computed by label_concepts.py from
+    RELATION_TO_EDGE_CLASSES — are loaded. Violating rows remain recorded
+    in typed_edges.csv and pipeline_stats.json. Set False in BOTH loaders
+    for "faithful" mode (everything loaded, violations visible via the
+    v_edges view).
 
 Stored vs derived (the relational answer to "where is the schema?"):
     edge_class    stored, and verified by the engine: CHECK
@@ -90,6 +99,9 @@ RESET_FIRST        = True       # truncate nodes+edges first (like DETACH
 ANALYZE_AFTER_LOAD = True       # refresh optimizer stats before benchmarking
 RUN_SYNC_CHECK     = True       # assert relation_edge_classes matches
                                 # label_concepts.RELATION_TO_EDGE_CLASSES
+STRICT_CONTRACT    = True       # symmetric with build_memgraph.py: do not
+                                # load edges whose realized class is not
+                                # permitted for their relation
 
 NODE_TYPES  = {"EntityNode", "ActionEventNode", "PropertyNode"}
 TYPE_LETTER = {"EntityNode": "E", "ActionEventNode": "A", "PropertyNode": "P"}
@@ -118,25 +130,23 @@ def read_csv(path):
         return list(csv.DictReader(f))
 
 
-def insert_rows(cursor, table, columns, rows, suffix="", table_alias=None):
+def insert_rows(cursor, table, columns, rows, suffix=""):
     """
     Parameterized multi-row INSERT, built explicitly.
 
-    Why not cursor.executemany(): the connector accelerates executemany only
-    for plain `INSERT ... VALUES` statements (regex-based rewrite), and its
-    behaviour with an ON DUPLICATE KEY UPDATE clause — especially the
-    MySQL 8.0.19+ row-alias form — varies across connector versions.
+    Why not cursor.executemany(): the connector accelerates executemany
+    only for plain `INSERT ... VALUES` statements (regex-based rewrite),
+    and its behaviour with an ON DUPLICATE KEY UPDATE clause — especially
+    the MySQL 8.0.19+ row-alias form — varies across connector versions.
 
-    `table_alias` exists for the row-alias ODKU dialect: with `... AS new`
-    declared, every column reference inside the ODKU clause must be
-    qualified, because an unqualified name that exists both on the table
-    and on the row alias is ambiguous (error 1052).
+    `suffix` is appended verbatim (see load_edges for the two ODKU
+    dialects). No table-alias parameter on purpose: MySQL's INSERT grammar
+    has no alias slot (error 1064 on `INSERT INTO t AS a ...`).
     """
     if not rows:
         return
-    target = f"{table} AS {table_alias}" if table_alias else table
     tuple_ph = "(" + ", ".join(["%s"] * len(columns)) + ")"
-    sql = (f"INSERT INTO {target} ({', '.join(columns)}) "
+    sql = (f"INSERT INTO {table} ({', '.join(columns)}) "
            f"VALUES {', '.join([tuple_ph] * len(rows))}{suffix}")
     params = [v for row in rows for v in row]
     cursor.execute(sql, params)
@@ -175,7 +185,9 @@ def supports_row_alias(version_str):
         return True
     return (major, minor) == (8, 0) and patch >= 19
 
+
 EXACT_COLLATIONS = {"utf8mb4_bin", "utf8mb4_0900_as_cs"}
+
 
 def check_collation(cursor):
     """Abort early if nodes.uri/name can fold distinct URIs together."""
@@ -202,6 +214,7 @@ def check_collation(cursor):
             "    MODIFY uri  VARCHAR(255) COLLATE utf8mb4_bin NOT NULL,\n"
             "    MODIFY name VARCHAR(255) COLLATE utf8mb4_bin NOT NULL;")
     print(f"  collation ok: uri={found['uri']}, name={found['name']}")
+
 
 def sync_check(cursor):
     """Assert relation_edge_classes == label_concepts.RELATION_TO_EDGE_CLASSES."""
@@ -317,13 +330,19 @@ def read_edges(path, uri2info, rel2id):
     """
     Read typed_edges.csv, validate against the node map and the relations
     table, derive edge_class from the endpoint types and cross-check it
-    against the CSV value. Violations of the relation->class permission are
-    NOT rejected here (they are data, surfaced by v_edges) — only
-    inconsistencies that would break the load or the input contract are.
+    against the CSV value. Only inconsistencies that would break the load
+    or the input contract abort here; permission violations are DATA —
+    under STRICT_CONTRACT they are filtered later in main(), otherwise
+    they load and are visible via the v_edges view.
     Returns (rows, count_of_permitted0).
     """
+    raw = read_csv(path)
+    if raw and "permitted" not in raw[0]:
+        raise SystemExit("typed_edges.csv lacks the 'permitted' column — "
+                         "regenerate it with label_concepts.py")
+
     rows, problems, csv_permitted0 = [], [], 0
-    for row in read_csv(path):
+    for row in raw:
         rel = (row.get("relation") or "").strip()
         s = (row.get("subject") or "").strip()
         o = (row.get("object") or "").strip()
@@ -363,6 +382,7 @@ def read_edges(path, uri2info, rel2id):
             "subject_id": si[0], "subject_type": si[1],
             "object_id": oi[0], "object_type": oi[1],
             "edge_class": ec, "weight": w,
+            "permitted": row["permitted"] == "1",
         })
 
     if problems:
@@ -405,28 +425,31 @@ def load_edges(conn, cursor, edges, row_alias):
     """
     The duplicate-triple rule, in the dialect the server supports.
 
-    Row-alias dialect (MySQL >= 8.0.19): with `... AS new` in place, MySQL
-    resolves ODKU references against BOTH the target table and the row
-    alias, so bare `weight` is ambiguous (error 1052). Every reference is
-    qualified — `e.weight` = the stored row, `new.weight` = the incoming
-    row — and the target table gets an alias for that. This is the shape
-    documented in the manual:
+    Row-alias dialect (MySQL >= 8.0.19) — the form emitted here:
 
-        INSERT INTO t AS t1 (a, b) VALUES (...) AS new
-          ON DUPLICATE KEY UPDATE t1.a = new.a;
+        INSERT INTO edges (cols...) VALUES (...), (...) AS new
+          ON DUPLICATE KEY UPDATE
+          edges.weight = GREATEST(edges.weight, new.weight)
 
-    Legacy dialect (MariaDB, MySQL < 8.0.19): VALUES(col) is the only form;
-    with no row alias there is a single namespace, so unqualified `weight`
-    is fine there.
+    Two dialect traps this shape avoids (both hit during development):
+      * error 1052 'Column weight is ambiguous': once `AS new` exists, an
+        unqualified column that exists on both the table and the row alias
+        must be qualified;
+      * error 1064 on `INSERT INTO edges AS e (...)`: MySQL's INSERT
+        grammar has no table-alias slot — qualification must use the plain
+        table name (`edges.weight`), which is exactly the manual's
+        documented form (INSERT INTO t1 (...) VALUES (...) AS new ON
+        DUPLICATE KEY UPDATE t1.a = new.a).
+
+    Legacy dialect (MariaDB, MySQL < 8.0.19): VALUES(col) — with no row
+    alias there is a single namespace, so unqualified weight is fine.
     """
     if row_alias:
-        table_alias = None
         suffix = (" AS new ON DUPLICATE KEY UPDATE "
-                "edges.weight = GREATEST(edges.weight, new.weight)")
+                  "edges.weight = GREATEST(edges.weight, new.weight)")
     else:
-        table_alias = None
         suffix = (" ON DUPLICATE KEY UPDATE "
-                "weight = GREATEST(weight, VALUES(weight))")
+                  "weight = GREATEST(weight, VALUES(weight))")
 
     by_rel = defaultdict(list)
     for edge in edges:
@@ -440,11 +463,9 @@ def load_edges(conn, cursor, edges, row_alias):
                 for edge in by_rel[rel]]
         t0 = time.time()
         for batch in chunks(rows, BATCH_SIZE):
-            insert_rows(cursor, "edges", EDGE_COLUMNS, batch, suffix,
-                        table_alias=table_alias)
+            insert_rows(cursor, "edges", EDGE_COLUMNS, batch, suffix)
             conn.commit()
-        print(f"  {rel:<28} {len(rows):>9,} edges  "
-              f"({time.time() - t0:.1f}s)")
+        print(f"  {rel:<28} {len(rows):>9,} edges  ({time.time() - t0:.1f}s)")
     print(f"  inserted {len(edges):,} edge rows "
           f"({time.time() - t_total:.1f}s total)")
 
@@ -466,7 +487,7 @@ def load_pipeline_stats():
     return None
 
 
-def report(cursor, csv_nodes, csv_edges, csv_permitted0, stats):
+def report(cursor, csv_nodes, es, stats):
     print("\nPost-load summary")
     for nt in ("EntityNode", "ActionEventNode", "PropertyNode"):
         cursor.execute("SELECT COUNT(*) FROM nodes WHERE node_type = %s",
@@ -479,9 +500,13 @@ def report(cursor, csv_nodes, csv_edges, csv_permitted0, stats):
     e = cursor.fetchone()[0]
     print(f"  {'nodes (total)':<18} {n:>9,}")
     print(f"  {'edges (total)':<18} {e:>9,}")
-    if e != csv_edges:
-        print(f"  [WARN] DB edge count != CSV row count ({csv_edges:,}); "
-              f"{csv_edges - e:,} duplicate triples merged (max-weight rule)")
+    merged = es["eligible"] - e
+    if merged:
+        print(f"  [INFO] {es['eligible']:,} eligible rows -> {e:,} edges "
+              f"({merged:,} duplicate triples merged, max-weight rule)")
+    if e != es["unique_expected"]:
+        print(f"  [WARN] edge count != unique triples "
+              f"({es['unique_expected']:,}) — investigate")
 
     print("\nLabel provenance")
     cursor.execute("SELECT label_source, COUNT(*) AS c FROM nodes "
@@ -489,29 +514,35 @@ def report(cursor, csv_nodes, csv_edges, csv_permitted0, stats):
     for src, c in cursor.fetchall():
         print(f"  {src:<16} {c:>9,}")
 
-    print("\nContract violations (permission parity)")
+    print("\nContract (a priori relation->class permission)")
+    print(f"  mode                 : "
+          f"{'STRICT — violating edges not loaded' if STRICT_CONTRACT else 'FAITHFUL — violations loaded and queryable'}")
+    print(f"  CSV rows permitted=0 : {es['csv_permitted0']:>9,}   "
+          f"(audit record: pipeline_stats.json / typed_edges.csv)")
+    if STRICT_CONTRACT:
+        print(f"  filtered at load     : {es['skipped_contract']:>9,}")
     cursor.execute("SELECT COUNT(*) FROM v_edges WHERE NOT permitted")
     db_viol = cursor.fetchone()[0]
-    print(f"  {'typed_edges.csv (permitted=0)':<30}: {csv_permitted0:>9,}")
-    print(f"  {'v_edges (NOT permitted)':<30}: {db_viol:>9,}")
-    stats_viol = None
-    if stats is not None:
-        stats_viol = sum(stats.get("contract_violations", {}).values())
-        print(f"  {'pipeline_stats.json':<30}: {stats_viol:>9,}")
-    if not (csv_permitted0 == db_viol and
-            (stats_viol is None or stats_viol == db_viol)):
-        print("  [WARN] violation counts disagree — check the sync of "
-              "relation_edge_classes / relation_class_perms")
+    print(f"  v_edges NOT permitted: {db_viol:>9,}")
+    if STRICT_CONTRACT and db_viol != 0:
+        print("  [WARN] STRICT mode loaded a violating edge — check the "
+              "sync of relation_edge_classes / relation_class_perms")
 
     if stats is not None:
         print("\nIsomorphism cross-check vs pipeline_stats.json")
         exp_nodes = stats.get("nodes_kept")
-        exp_edges = (stats.get("edges_kept", 0)
-                     - stats.get("edges_duplicate_triples", 0))
+        stats_viol = sum(stats.get("contract_violations", {}).values())
+        dups = stats.get("edges_duplicate_triples", 0)
+        exp_edges = (stats.get("edges_kept", 0) - dups
+                     - (stats_viol if STRICT_CONTRACT else 0))
         print(f"  nodes: DB {n:>9,}  expected {exp_nodes:>9,}  "
               f"[{'ok' if exp_nodes == n else 'MISMATCH'}]")
-        print(f"  edges: DB {e:>9,}  expected {exp_edges:>9,}  "
-              f"[{'ok' if exp_edges == e else 'MISMATCH'}]")
+        flag = "ok" if exp_edges == e else "CAUTION"
+        print(f"  edges: DB {e:>9,}  expected {exp_edges:>9,}  [{flag}]")
+        if flag != "ok" and dups and stats_viol:
+            print("    (the stats formula assumes duplicate rows and "
+                  "violating rows are disjoint; the loader-side "
+                  "unique-triple check above is the authoritative one)")
     else:
         print("\n(pipeline_stats.json not found — isomorphism cross-check "
               "skipped)")
@@ -567,8 +598,7 @@ def main():
         print("  duplicate handling: "
               + ("row alias 'AS new' (MySQL >= 8.0.19)" if row_alias
                  else "VALUES() (legacy form)"))
-        check_collation(cursor)        
-        sync_check(cursor)
+        check_collation(cursor)
         sync_check(cursor)
         rel2id, sources = fetch_reference_sets(cursor)
 
@@ -582,9 +612,27 @@ def main():
         uri2info, node_rows = assign_ids(nodes)
 
         print(f"\nReading {EDGES_FILE} ...")
-        edges, csv_permitted0 = read_edges(EDGES_FILE, uri2info, rel2id)
-        print(f"  {len(edges):,} edges ({csv_permitted0:,} flagged "
+        edges_all, csv_permitted0 = read_edges(EDGES_FILE, uri2info, rel2id)
+        print(f"  {len(edges_all):,} edges ({csv_permitted0:,} flagged "
               f"permitted=0)")
+
+        if STRICT_CONTRACT:
+            edges = [edge for edge in edges_all if edge["permitted"]]
+            skipped_contract = len(edges_all) - len(edges)
+            print(f"  strict contract: {skipped_contract:,} violating edges "
+                  f"NOT loaded (recorded in pipeline_stats.json)")
+        else:
+            edges, skipped_contract = edges_all, 0
+
+        es = {
+            "csv_total": len(edges_all),
+            "eligible": len(edges),
+            "unique_expected": len({(edge["subject_id"], edge["relation_id"],
+                                     edge["object_id"]) for edge in edges}),
+            "skipped_name": 0,      # SQL has no Cypher-name constraint
+            "skipped_contract": skipped_contract,
+            "csv_permitted0": csv_permitted0,
+        }
 
         print("\nReset")
         reset(conn, cursor)
@@ -599,8 +647,7 @@ def main():
             print("\nOptimizer statistics")
             analyze(cursor)
 
-        report(cursor, len(nodes), len(edges), csv_permitted0,
-               load_pipeline_stats())
+        report(cursor, len(nodes), es, load_pipeline_stats())
     finally:
         conn.close()
 
