@@ -111,8 +111,8 @@ EDGE_CLASS_TYPES = {
     "E2P": (E, P),
     "E2A": (E, A),
     "P2P": (P, P),      # no relation maps here today; kept for completeness
-    "P2E": (P, E),
-    "P2A": (P, A),
+    "P2E": (P, E),      # no relation maps here today; kept for completeness
+    "P2A": (P, A),      # no relation maps here today; kept for completeness
     "A2A": (A, A),
     "A2P": (A, P),
     "A2E": (A, E),      # no relation maps here today; kept for completeness
@@ -149,8 +149,6 @@ RELATION_TO_EDGE_CLASSES = {
     "NotDesires":                {"E2A"},
     "ReceivesAction":            {"E2A"},
     "UsedFor":                   {"E2A"},
-    # --- P2E / P2A -------------------------------------------------------
-    "PropertyOf":                {"P2E", "P2A"},
     # --- A2A -------------------------------------------------------------
     "Entails":                   {"A2A"},
     "HasFirstSubevent":          {"A2A"},
