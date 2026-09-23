@@ -23,40 +23,37 @@ graph image of nodes.node_type and of edge_class).
 Identity rules — mirrored exactly by build_mysql.py:
     node = uri
     edge = (subject, relation, object); a duplicate triple keeps the max
-    weight (MERGE ... ON MATCH SET), the Cypher image of MySQL's
-    INSERT ... ON DUPLICATE KEY UPDATE.
+    weight. The rule is now enforced in PYTHON, before creation (the SQL
+    image is INSERT ... ON DUPLICATE KEY UPDATE ... GREATEST(...)).
+
+PLANNER NOTE (why this loader avoids property matching in bulk):
+    On several Memgraph versions the planner does NOT use the
+    :Concept(uri) index when the matched value comes from an UNWIND row
+    variable — `MATCH (s:Concept {uri: row.subject})` compiles to ScanAll.
+    With 482k edges x 2 endpoint lookups x 291k nodes that is ~10^11
+    comparisons (~20 hours). This version therefore:
+      * creates nodes with CREATE (no existence check, no matching);
+      * resolves URIs to internal ids with ONE full scan;
+      * binds edge endpoints either by internal id (fast path) or by
+        per-edge PARAMETERS (safe path — parameters are the documented
+        indexed lookup form);
+      * chooses between the two with a behavioral canary that measures
+        which one the installed Memgraph actually accelerates.
+    Memgraph has no index hints, so being planner-agnostic is the robust
+    choice.
 
 A priori contract (STRICT_CONTRACT = True):
     only edges whose realized (subject_type, object_type) class is
     permitted for their relation — per RELATION_TO_EDGE_CLASSES in
     label_concepts.py, precomputed as the CSV `permitted` column — are
     loaded. Violating rows remain recorded in typed_edges.csv and
-    pipeline_stats.json; they simply do not enter the graph. Set False in
-    BOTH loaders for "faithful" mode (everything loaded, violations
-    queryable in-DB).
+    pipeline_stats.json. Set False in BOTH loaders for "faithful" mode.
 
 Declared schema as data (LOAD_SCHEMA_META = True):
-    property graphs cannot declare edge endpoint-type constraints, so the
-    contract itself is stored as a small meta-graph under :Schema (kept
-    out of every :Concept scope):
-        (:Schema:NodeType)
-        (:Schema:EdgeClass)-[:FROM|:TO]->(:Schema:NodeType)
-        (:Schema:RelationType {wildcard})-[:PERMITS]->(:Schema:EdgeClass)
-    ALL grants are expanded to the 9 concrete classes, mirroring
-    relation_class_perms in conceptnet_schema.sql. The post-load report
-    then verifies the loaded data against this declared schema with one
-    query — the Cypher counterpart of
-    SELECT COUNT(*) FROM v_edges WHERE NOT permitted.
-
-Other notes
-    * edge_class / permitted are NOT stored on edges: the class is implied
-      by the endpoint labels, the permission by the relation type — the
-      graph answer to what SQL stores in tables and columns.
-    * set CREATE_EDGE_TYPE_INDEXES = True if your Memgraph version
-      supports edge-type indexes; guarded below.
-    * persistence: Memgraph is in-memory; enable snapshots/WAL
-      (--storage-snapshot-interval-sec, --storage-wal-enabled) if you want
-      the graph to survive restarts.
+    (:Schema:NodeType), (:Schema:EdgeClass)-[:FROM|:TO]->(:Schema:NodeType),
+    (:Schema:RelationType {wildcard})-[:PERMITS]->(:Schema:EdgeClass)
+    — the contract stored as data, checked by the D1 query (the Cypher
+    counterpart of SELECT COUNT(*) FROM v_edges WHERE NOT permitted).
 
 Run order
     1. python label_concepts.py       (produces the two CSVs)
@@ -88,10 +85,19 @@ MEMGRAPH_URI  = "bolt://localhost:7687"
 MEMGRAPH_AUTH = ("", "")
 
 BATCH_SIZE               = 5_000
-RESET_FIRST              = True
+RESET_FIRST              = True      # must stay True: this loader CREATES,
+                                     # so it always wipes and rebuilds
 CREATE_EDGE_TYPE_INDEXES = False
 STRICT_CONTRACT          = True
 LOAD_SCHEMA_META         = True
+
+# "auto"  : run the plan canary and pick automatically (default)
+# "id"    : force the fast path (UNWIND + WHERE id(n) = row.id)
+# "param" : force the safe path (one parameterized query per edge)
+EDGE_LOAD_STRATEGY = "auto"
+CANARY_EDGES       = 200    # throwaway edges used to measure the planner
+CANARY_THRESHOLD_S = 1.0    # seek answers in ms; a scan of 291k nodes per
+                            # lookup takes seconds — 1s separates them
 
 NODE_TYPES  = {"EntityNode", "ActionEventNode", "PropertyNode"}
 RELATION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")   # guards the f-strings
@@ -100,7 +106,7 @@ LETTER_TO_TYPE = {"E": "EntityNode", "A": "ActionEventNode",
                   "P": "PropertyNode"}
 ALL_CLASSES = [f"{a}2{b}" for a in "EAP" for b in "EAP"]
 
-# Post-load verification queries ------------------------------------------------
+# Post-load verification queries ---------------------------------------------
 
 LABEL_INVARIANT_QUERY = """
     MATCH (n:Concept)
@@ -116,8 +122,6 @@ LABEL_INVARIANT_QUERY = """
                     THEN 1 ELSE 0 END) AS malformed
 """
 
-# Every loaded relation exists in the meta-graph (label_concepts.py drops
-# unknown relations from the CSV), so the inner MATCH always binds.
 VIOLATION_QUERY = """
     MATCH (s:Concept)-[r]->(o:Concept)
     MATCH (rt:Schema:RelationType) WHERE rt.name = type(r)
@@ -161,6 +165,10 @@ def load_pipeline_stats():
 def setup_schema(session, relations):
     # Wipes EVERYTHING (data + :Schema meta-graph of a previous run); the
     # meta-graph is rebuilt afterwards by load_schema_meta().
+    # NOTE: creation failures are swallowed on purpose (version-tolerant),
+    # so ALWAYS check that the "ok:" lines below actually printed "ok" —
+    # a silently missing uri index is what turned a previous load into a
+    # 20-hour scan fest.
     if RESET_FIRST:
         session.run("MATCH (n) DETACH DELETE n")
     run_ignore_errors(session,
@@ -176,44 +184,118 @@ def setup_schema(session, relations):
 # --- Loading --------------------------------------------------------------------
 
 def load_nodes(session, nodes):
+    """
+    CREATE, not MERGE: typed_nodes.csv is unique by uri (validated here;
+    the :Concept(uri) uniqueness constraint is the engine-side safety
+    net) and the graph was wiped in setup_schema, so no existence check
+    is needed. Crucially, this means NO property matching at all during
+    node loading — immune to the UNWIND/ScanAll planner issue.
+    """
+    seen = set()
     by_type = defaultdict(list)
     for n in nodes:
         if n["node_type"] not in NODE_TYPES:
             raise SystemExit(f"typed_nodes.csv: unknown node_type "
                              f"{n['node_type']!r} (URI {n['uri']})")
+        if n["uri"] in seen:
+            raise SystemExit(f"typed_nodes.csv: duplicate uri {n['uri']!r}")
+        seen.add(n["uri"])
         by_type[n["node_type"]].append(n)
 
     for node_type, rows in sorted(by_type.items()):
         cypher = f"""
             UNWIND $rows AS row
-            MERGE (c:Concept:{node_type} {{uri: row.uri}})
-            SET c.name = row.name,
-                c.pos = row.pos,
-                c.label_source = row.label_source
+            CREATE (c:Concept:{node_type} {{
+                uri:   row.uri,
+                name:  row.name,
+                pos:   row.pos,
+                label_source: row.label_source
+            }})
         """
         t0, count = time.time(), 0
         for i in range(0, len(rows), BATCH_SIZE):
             batch = rows[i:i + BATCH_SIZE]
-            session.run(cypher, rows=batch)
+            session.run(cypher, rows=batch).consume()
             count += len(batch)
         print(f"  :{node_type:<15} {count:>9,} nodes   "
               f"({time.time() - t0:.1f}s)")
 
 
-def load_edges(session, edges):
+def build_uri_id_map(session):
+    """
+    ONE full scan of the already-loaded nodes: uri -> internal id.
+    Internal ids are only used within this same load run (no restarts, no
+    deletions in between — the canary below runs BEFORE this map is
+    built), which is exactly the lifetime we need.
+    """
+    t0 = time.time()
+    uri2id = {}
+    result = session.run("MATCH (n:Concept) RETURN n.uri AS uri, id(n) AS nid")
+    for rec in result:
+        uri2id[rec["uri"]] = rec["nid"]
+    print(f"  uri->id map: {len(uri2id):,} entries  "
+          f"({time.time() - t0:.1f}s)")
+    return uri2id
+
+
+def choose_edge_strategy(session):
+    """
+    Decide how edges bind their endpoints — by MEASURING the planner.
+
+    The canary runs after the nodes are loaded and times a small batch of
+    id-bound edges between two throwaway nodes, using exactly the query
+    form of the fast path:
+        UNWIND $rows AS row
+        MATCH (s) WHERE id(s) = row.sid
+        MATCH (o) WHERE id(o) = row.oid
+        CREATE (s)-[:RelatedTo {weight: row.w}]->(o)
+    If `WHERE id(n) = row.id` compiles to a by-id seek, 200 edges answer
+    in milliseconds; if it compiles to a scan, each of the 400 lookups
+    visits all 291k nodes and the batch takes seconds. The measured time
+    therefore picks the strategy — no reliance on operator names.
+    """
+    if EDGE_LOAD_STRATEGY != "auto":
+        print(f"  edge strategy: forced '{EDGE_LOAD_STRATEGY}'")
+        return EDGE_LOAD_STRATEGY
+
+    session.run("CREATE (:_LoadCanary {k: 1}), (:_LoadCanary {k: 2})")
+    try:
+        ids = [rec["nid"] for rec in session.run(
+            "MATCH (c:_LoadCanary) RETURN id(c) AS nid ORDER BY c.k")]
+        if len(ids) != 2:
+            raise SystemExit("canary: could not create probe nodes")
+        rows = [{"sid": ids[0], "oid": ids[1], "w": 1.0}] * CANARY_EDGES
+        query = ("UNWIND $rows AS row "
+                 "MATCH (s) WHERE id(s) = row.sid "
+                 "MATCH (o) WHERE id(o) = row.oid "
+                 "CREATE (s)-[:RelatedTo {weight: row.w}]->(o)")
+        t0 = time.time()
+        session.run(query, rows=rows).consume()
+        elapsed = time.time() - t0
+    finally:
+        session.run("MATCH (c:_LoadCanary) DETACH DELETE c")
+
+    strategy = "id" if elapsed < CANARY_THRESHOLD_S else "param"
+    verdict = ("by-id seek works — fast path" if strategy == "id" else
+               "scan detected — safe path (parameterized lookups)")
+    print(f"  plan canary: {CANARY_EDGES} id-bound edges in "
+          f"{elapsed:.3f}s -> {verdict}")
+    return strategy
+
+
+def load_edges(session, edges, strategy):
     """
     Load typed_edges.csv as one edge type per relation, applying the same
     filters build_mysql.py applies (so the two stores stay isomorphic):
       * relation names must be Cypher-safe (RELATION_RE);
       * STRICT_CONTRACT: rows with permitted=0 are not loaded.
-    MERGE gives idempotent re-runs and the edge-identity rule: a duplicate
-    (subject, relation, object) triple keeps the max weight.
-    Returns a stats dict consumed by report().
+    Duplicate (subject, relation, object) triples keep the max weight —
+    enforced in Python (the image of MySQL's ON DUPLICATE KEY UPDATE).
+    Endpoint binding uses the chosen strategy; neither path performs a
+    property match driven by an UNWIND row variable.
     """
     by_rel = defaultdict(list)
     skipped_name = skipped_contract = csv_permitted0 = 0
-    seen, unique_expected = set(), 0
-
     for e in edges:
         rel = e["relation"].strip()
         if not RELATION_RE.match(rel):
@@ -224,12 +306,7 @@ def load_edges(session, edges):
             if STRICT_CONTRACT:
                 skipped_contract += 1
                 continue
-        key = (e["subject"], rel, e["object"])
-        if key not in seen:
-            seen.add(key)
-            unique_expected += 1
-        e["weight"] = float(e["weight"])
-        by_rel[rel].append(e)
+        by_rel[rel].append((e["subject"], e["object"], float(e["weight"])))
 
     if skipped_name:
         print(f"  [WARN] {skipped_name:,} edges with non-Cypher-safe "
@@ -239,29 +316,60 @@ def load_edges(session, edges):
               f"NOT loaded (recorded in pipeline_stats.json / "
               f"typed_edges.csv)")
 
+    uri2id = None
+    if strategy == "id":
+        uri2id = build_uri_id_map(session)
+        referenced = {u for rows in by_rel.values()
+                        for (s, o, _w) in rows for u in (s, o)}
+        missing = referenced - uri2id.keys()
+        if missing:
+            raise SystemExit(
+                f"typed_edges.csv references {len(missing):,} uris absent "
+                f"from typed_nodes.csv (e.g. {sorted(missing)[:3]})")
+
+    eligible = 0
+    unique_expected = 0
     for rel in sorted(by_rel):
-        rows = by_rel[rel]
-        cypher = f"""
-            UNWIND $rows AS row
-            MATCH (s:Concept {{uri: row.subject}})
-            MATCH (o:Concept {{uri: row.object}})
-            MERGE (s)-[r:{rel}]->(o)
-            ON CREATE SET r.weight = row.weight
-            ON MATCH  SET r.weight = CASE WHEN row.weight > r.weight
-                                          THEN row.weight ELSE r.weight END
-        """
+        rows_in = by_rel[rel]
+        eligible += len(rows_in)
+
+        # duplicate triples: keep the max weight
+        best = {}
+        for s, o, w in rows_in:
+            if (s, o) not in best or w > best[(s, o)]:
+                best[(s, o)] = w
+        pairs = [(s, o, w) for (s, o), w in best.items()]
+        unique_expected += len(pairs)
+
         t0 = time.time()
-        for i in range(0, len(rows), BATCH_SIZE):
-            session.run(cypher, rows=rows[i:i + BATCH_SIZE])
-        print(f"  {rel:<28} {len(rows):>9,} edges  ({time.time() - t0:.1f}s)")
+        if strategy == "id":
+            batch = [{"sid": uri2id[s], "oid": uri2id[o], "w": w}
+                     for s, o, w in pairs]
+            cypher = (f"UNWIND $rows AS row "
+                      f"MATCH (s) WHERE id(s) = row.sid "
+                      f"MATCH (o) WHERE id(o) = row.oid "
+                      f"CREATE (s)-[:{rel} {{weight: row.w}}]->(o)")
+            for i in range(0, len(batch), BATCH_SIZE):
+                session.run(cypher, rows=batch[i:i + BATCH_SIZE]).consume()
+        else:
+            # parameters are the documented indexed-lookup form:
+            # the planner picks the :Concept(uri) index for $su / $ou
+            cypher = (f"MATCH (s:Concept {{uri: $su}}) "
+                      f"MATCH (o:Concept {{uri: $ou}}) "
+                      f"CREATE (s)-[:{rel} {{weight: $w}}]->(o)")
+            for s, o, w in pairs:
+                session.run(cypher, su=s, ou=o, w=w).consume()
+        print(f"  {rel:<28} {len(pairs):>9,} edges  "
+              f"({time.time() - t0:.1f}s)")
 
     return {
         "csv_total": len(edges),
-        "eligible": sum(len(v) for v in by_rel.values()),
+        "eligible": eligible,
         "unique_expected": unique_expected,
         "skipped_name": skipped_name,
         "skipped_contract": skipped_contract,
         "csv_permitted0": csv_permitted0,
+        "strategy": strategy,
     }
 
 
@@ -273,12 +381,11 @@ def load_schema_meta(session):
         (:Schema:EdgeClass)-[:FROM|:TO]->(:Schema:NodeType)
         (:Schema:RelationType {wildcard})-[:PERMITS]->(:Schema:EdgeClass)
     ALL grants are expanded to the 9 concrete classes, mirroring
-    relation_class_perms in conceptnet_schema.sql.
+    relation_class_perms in conceptnet_schema.sql. (~50 nodes: matching
+    here is trivially cheap even without indexes.)
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        # NB: importing label_concepts pulls in nltk/requests; acceptable
-        # for a one-shot meta load, skipped gracefully if unavailable.
         from label_concepts import RELATION_TO_EDGE_CLASSES
     except Exception as exc:
         print(f"  [WARN] schema meta-graph skipped — label_concepts.py "
@@ -330,11 +437,11 @@ def report(session, es, stats):
             f"MATCH (n:{label}) RETURN count(n) AS c").single()["c"]
         print(f"  :{label:<15} {c:>9,} nodes")
     n = session.run("MATCH (n:Concept) RETURN count(n) AS c").single()["c"]
-    # Concept-scoped, so the :Schema meta-graph never contaminates counts.
     e = session.run(
         "MATCH (:Concept)-[r]->(:Concept) RETURN count(r) AS c").single()["c"]
     print(f"  {'nodes (total)':<18} {n:>9,}")
     print(f"  {'edges (total)':<18} {e:>9,}")
+    print(f"  {'edge load strategy':<18} {es.get('strategy', '?')}")
     merged = es["eligible"] - e
     if merged:
         print(f"  [INFO] {es['eligible']:,} eligible rows -> {e:,} edges "
@@ -405,8 +512,6 @@ def report_storage(session):
         print(f"  (unavailable: {exc.code})")
         return
     for rec in recs:
-        # Handle both possible shapes: one map field per row, or flat
-        # name/value fields.
         if len(rec) == 1 and isinstance(next(iter(rec.values())), dict):
             info = next(iter(rec.values()))
             print(f"  {str(info.get('name', '?')):<32} {info.get('value', '?')}")
@@ -418,6 +523,11 @@ def report_storage(session):
 
 def main():
     t_start = time.time()
+
+    if not RESET_FIRST:
+        raise SystemExit(
+            "This loader uses CREATE (no MERGE), so it must wipe and "
+            "rebuild: RESET_FIRST has to stay True.")
 
     print(f"Reading {NODES_FILE} ...")
     nodes = read_csv(NODES_FILE)
@@ -433,7 +543,8 @@ def main():
         raise SystemExit("typed_edges.csv lacks the 'permitted' column — "
                          "regenerate it with label_concepts.py")
 
-    relations = sorted({e["relation"].strip() for e in edges})
+    relations = sorted({e["relation"].strip() for e in edges
+                        if RELATION_RE.match(e["relation"].strip())})
     driver = GraphDatabase.driver(MEMGRAPH_URI, auth=MEMGRAPH_AUTH)
     try:
         with driver.session() as session:
@@ -441,8 +552,10 @@ def main():
             setup_schema(session, relations)
             print("\nLoading nodes")
             load_nodes(session, nodes)
+            print("\nEdge strategy (plan canary)")
+            strategy = choose_edge_strategy(session)
             print("\nLoading edges")
-            es = load_edges(session, edges)
+            es = load_edges(session, edges, strategy)
             if LOAD_SCHEMA_META:
                 print("\nSchema meta-graph (declared contract as data)")
                 load_schema_meta(session)
