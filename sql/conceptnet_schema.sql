@@ -141,8 +141,6 @@ INSERT INTO relation_edge_classes (relation_id, edge_class) VALUES
     (29,'E2A'),   -- NotDesires
     (32,'E2A'),   -- ReceivesAction
     (37,'E2A'),   -- UsedFor
-    -- P2E / P2A
-    (40,'P2E'),(40,'P2A'),   -- PropertyOf
     -- A2A
     (11,'A2A'),   -- Entails
     (17,'A2A'),   -- HasFirstSubevent
