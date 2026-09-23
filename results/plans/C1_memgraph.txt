@@ -1,0 +1,8 @@
+-- C1 (memgraph) hub ranking (full scan + one-pass grouping)
+
+MATCH (n:Concept)-[r]->(:Concept)
+RETURN n.name AS name, count(r) AS out_degree
+ORDER BY out_degree DESC, name LIMIT 10
+
+---- PLAN ----
+* None

@@ -12,10 +12,20 @@
 --             as the `permitted` flag of v_edges. Variant B below can turn
 --             it into an enforced FK.
 --
+-- CLASS-PARTITION NOTE (design decision, post-incident): the 3x3 endpoint
+-- type partition is COMPLETE BY DESIGN. Classes with zero population in a
+-- given slice (P2P, P2E, P2A here — the load log realizes 35 relations,
+-- PropertyOf among the absent ones) are empirical findings that query C2
+-- reports, not redundancy. Removing "empty" classes desynchronizes the
+-- contract's five materializations (dict, CSV, relation_edge_classes,
+-- relation_class_perms, :Schema meta-graph) and produces phantom
+-- violations in v_edges (61,416 in the incident of record). Don't.
+--
 -- Companion artifacts (keep in sync):
 --   * label_concepts.py — its RELATION_TO_EDGE_CLASSES must match the
---     relation_edge_classes seed below; its typing rule matches
---     chk_nodes_pos_type; its output columns match the loader contract:
+--     relation_edge_classes seed below (44 grants over 40 relations);
+--     its typing rule matches chk_nodes_pos_type; its output columns
+--     match the loader contract:
 --       typed_nodes.csv : uri, name, pos, node_type, label_source
 --       typed_edges.csv : relation, subject, object, weight, edge_class,
 --                         permitted
@@ -30,9 +40,6 @@
 --
 -- Requires MySQL 8.0.16+ (CHECK enforcement); loader-side row aliases for
 -- ON DUPLICATE KEY UPDATE need 8.0.20+ (older: use VALUES(weight)).
---
--- If you previously loaded the 9-table schema, this file replaces it
--- (the DROP DATABASE below wipes the old one).
 -- ============================================================================
 
 DROP DATABASE IF EXISTS conceptnet;
@@ -82,10 +89,11 @@ INSERT INTO relations (relation_id, relation_name) VALUES
     (25,'MadeOf'),(26,'MannerOf'),(27,'MotivatedByGoal'),(28,'NotCapableOf'),
     (29,'NotDesires'),(30,'NotHasProperty'),(31,'PartOf'),(32,'ReceivesAction'),
     (33,'RelatedTo'),(34,'SimilarTo'),(35,'SymbolOf'),(36,'Synonym'),
-    (37,'UsedFor'),(38,'dbpedia'),(39,'LocationOf'),(40,'PropertyOf');
+    (37,'UsedFor'),(38,'dbpedia');
 
 -- ALL is a permission marker referenced by relation_edge_classes, not a
--- concrete class. This table mirrors EDGE_CLASS_TYPES in label_concepts.py.
+-- concrete class. This table mirrors EDGE_CLASS_TYPES in label_concepts.py:
+-- the complete 3x3 partition (see the CLASS-PARTITION NOTE above).
 CREATE TABLE edge_classes (
     edge_class   VARCHAR(4)  NOT NULL PRIMARY KEY,
     subject_type VARCHAR(16) NULL,
@@ -98,9 +106,12 @@ INSERT INTO edge_classes (edge_class, subject_type, object_type) VALUES
     ('E2E','EntityNode','EntityNode'),
     ('E2P','EntityNode','PropertyNode'),
     ('E2A','EntityNode','ActionEventNode'),
+    ('P2P','PropertyNode','PropertyNode'),       -- zero-population in this slice;
+    ('P2E','PropertyNode','EntityNode'),         -- kept BY DESIGN: the partition
+    ('P2A','PropertyNode','ActionEventNode'),    -- is the model, populations are data
     ('A2A','ActionEventNode','ActionEventNode'),
     ('A2P','ActionEventNode','PropertyNode'),
-    ('A2E','ActionEventNode','EntityNode'),
+    ('A2E','ActionEventNode','EntityNode'),      -- zero-population in this slice
     ('ALL',NULL,NULL);
 
 -- MUST match RELATION_TO_EDGE_CLASSES in label_concepts.py (44 rows).
@@ -130,6 +141,8 @@ INSERT INTO relation_edge_classes (relation_id, edge_class) VALUES
     ( 7,'E2E'),( 7,'E2P'),   -- DefinedAs
     (20,'E2P'),(20,'A2P'),   -- HasProperty
     (30,'E2P'),(30,'A2P'),   -- NotHasProperty
+    -- P2E / P2A
+    (40,'P2E'),(40,'P2A'),   -- PropertyOf
     -- E2A
     ( 3,'E2A'),   -- CapableOf
     ( 6,'E2A'),   -- CreatedBy
@@ -159,9 +172,13 @@ INSERT INTO relation_edge_classes (relation_id, edge_class) VALUES
     (38,'ALL');   -- dbpedia
 
 -- The ALL wildcard EXPANDED into the 9 concrete classes, unioned with the
--- specific grants. This is the lookup/enforcement target for `permitted`;
--- the expansion itself is a small set-based SQL demo worth showing in the
--- report.
+-- specific grants: 10 wildcards x 9 + 34 specific = 124 rows expected.
+-- This is the lookup/enforcement target for `permitted` (what v_edges
+-- reads); the expansion itself is a small set-based SQL demo worth showing
+-- in the report. NOTE: built ONCE here, at schema-creation time — this is
+-- the table whose staleness caused the 61,416 phantom violations, which is
+-- why build_mysql.py now verifies it against relation_edge_classes at every
+-- startup (check_perms_expansion).
 CREATE TABLE relation_class_perms (
     relation_id INT        NOT NULL,
     edge_class  VARCHAR(4) NOT NULL,
@@ -190,9 +207,7 @@ CREATE TABLE nodes (
     -- folds '/c/en/oogenetic' = '/c/en/oögenetic' and the unique key rejects
     -- one of them (error 1062). With utf8mb4_bin, DB equality is identical
     -- to Python string equality, so the loader's preflight dedup becomes a
-    -- complete guarantee. (utf8mb4_0900_as_cs is an acceptable MySQL 8.0
-    -- alternative if you want linguistically sensible ORDER BY on these
-    -- columns; MariaDB users should stay on utf8mb4_bin.)
+    -- complete guarantee.
     uri          VARCHAR(255) COLLATE utf8mb4_bin NOT NULL,
     name         VARCHAR(255) COLLATE utf8mb4_bin NOT NULL,
     pos          CHAR(1)      NOT NULL,          -- n | v | a | r | s
@@ -311,8 +326,8 @@ GROUP BY r.relation_id, r.relation_name;
 --   nodes == nodes_kept
 --   edges == edges_kept - edges_duplicate_triples   (max-weight merges)
 --
--- Permission parity (must equal the permitted=0 count in typed_edges.csv
--- and the contract_violations total in pipeline_stats.json):
+-- Permission parity (must be 0 in STRICT mode; equal to the permitted=0
+-- count in typed_edges.csv in faithful mode):
 --   SELECT COUNT(*) FROM v_edges WHERE NOT permitted;
 --
 -- Optimizer statistics before any benchmarking:

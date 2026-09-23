@@ -1,0 +1,8 @@
+-- A4b (memgraph) undirected 1-hop: OR predicate vs. one pattern
+
+MATCH (:Concept {name: 'abundant'})-[:Antonym]-(y:Concept)
+RETURN y.name AS neighbor
+ORDER BY neighbor
+
+---- PLAN ----
+* None

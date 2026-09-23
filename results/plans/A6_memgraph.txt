@@ -1,8 +1,8 @@
--- A6 (memgraph) set difference (anti-join vs. negated pattern)
+-- A6 (memgraph) range selection on a sorted index
 
-MATCH (x:Concept)-[:AtLocation]->(:Concept {name: 'enzyme'})
-WHERE NOT (x)-[:AtLocation]->(:Concept {name: 'cell'})
-RETURN DISTINCT x.name AS name
+MATCH (n:Concept)
+WHERE n.name >= 'cell' AND n.name <= 'gene'
+RETURN n.name AS name, CASE WHEN n:EntityNode THEN 'EntityNode' WHEN n:ActionEventNode THEN 'ActionEventNode' ELSE 'PropertyNode' END AS node_type
 ORDER BY name
 
 ---- PLAN ----

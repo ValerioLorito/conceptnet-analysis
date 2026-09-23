@@ -1,0 +1,8 @@
+-- B6 (memgraph) traversal feeding aggregation (bags vs sets!)
+
+MATCH (:Concept {name: 'enzyme'})-[]->(nbr:Concept)-[r2]->()
+RETURN nbr.name AS name, count(DISTINCT r2) AS out_degree
+ORDER BY out_degree DESC, name LIMIT 50
+
+---- PLAN ----
+* None

@@ -133,7 +133,6 @@ RELATION_TO_EDGE_CLASSES = {
     "InstanceOf":                {"E2E"},
     "IsA":                       {"E2E"},
     "LocatedNear":               {"E2E"},
-    "LocationOf":                {"E2E"},
     "MadeOf":                    {"E2E"},
     "PartOf":                    {"E2E"},
     "SymbolOf":                  {"E2E"},
@@ -141,6 +140,11 @@ RELATION_TO_EDGE_CLASSES = {
     "DefinedAs":                 {"E2E", "E2P"},
     "HasProperty":               {"E2P", "A2P"},
     "NotHasProperty":            {"E2P", "A2P"},
+        # --- E2P / A2P -------------------------------------------------------
+    "DefinedAs":                 {"E2E", "E2P"},
+    "HasProperty":               {"E2P", "A2P"},
+    "NotHasProperty":            {"E2P", "A2P"},
+    # --- P2E / P2A -------------------------------------------------------
     # --- E2A -------------------------------------------------------------
     "CapableOf":                 {"E2A"},
     "CreatedBy":                 {"E2A"},

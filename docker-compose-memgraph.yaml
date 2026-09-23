@@ -4,7 +4,7 @@ services:
   memgraph:
     image: memgraph/memgraph-mage:latest
     container_name: memgraph-mage
-    command: /usr/lib/memgraph/memgraph --log-level=TRACE
+    command: --log-level=TRACE
     ports:
       - "7444:7444"
       - "7687:7687"

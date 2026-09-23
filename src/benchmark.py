@@ -1,52 +1,76 @@
 #!/usr/bin/env python3
 """
-benchmark.py — execute the query battery on MySQL and Memgraph and emit
-the comparison analytics for the report.
+benchmark.py — execute the FINAL query battery (Queries.pdf) on MySQL and
+Memgraph and emit the comparison analytics for the report.
 
-Battery (one mechanism per query):
-    A0  equality selection via index (baseline)
-    A1  1-hop fan-out + tuple reassembly (join-backs)
-    A2  discriminated access (relation + endpoint type)
-    A2v multi-class relation (DefinedAs) — the UNION-penalty control
-    A2w + weight-range predicate on a non-indexed attribute
-    A3a reverse-direction access
-    A3b undirected/symmetric access (Antonym, reciprocal encoding)
-    A4  two-anchor intersection (join topology in the pattern)
-    A5  range selection on a sorted secondary index
-    A6  set difference (anti-join vs. negated pattern)
-    B1  k-hop expansion, k=1..4  (the headline latency-vs-depth figure)
-    B2  transitive closure (recursive CTE vs. variable-length)
-    B2v bounded RPQ with alternation (IsA|PartOf)
-    B3  shortest path (undirected, any relation)
-    B4  weighted path scoring — Cypher only (expressiveness boundary)
-    B5  anchored triangle (cyclic pattern)
-    B6  traversal feeding aggregation (neighborhood degree profile)
-    C1  hub ranking (full scan + one-pass grouping)
-    C1v relation-scoped aggregation (UsedFor objects)
-    C2  relation x class matrix (stored vs. derived grouping key)
-    D1  contract conformance (view vs. meta-graph anti-join)
+Battery — exactly the 18 queries of the final list, same numbering:
+
+FAMILY A (Local Retrieval)
+    A1  Single Node Search by URI          (equality on the unique key — baseline)
+    A2  Full Relation Table Search         (1-hop fan-out + tuple reassembly)
+    A3  Relation 1-hop Search              (discriminated access)
+    A4a Directed (reverse) 1-hop Search    (second index vs. free adjacency)
+    A4b Undirected 1-hop Search            (OR predicate vs. one pattern)
+    A5  Relation Pair Intersection         (join topology in the pattern)
+    A6  Range Selection                    (sorted-index range vs. filter)
+    A7  Neighborhoods Set Difference       (anti-join vs. negated pattern)
+FAMILY B (Traversal Paths)
+    B1  K-Hop Neighborhood, k=1..4         (the latency-vs-depth headline)
+    B2  Transitive Closure                 (recursive CTE vs. *1..d, depth 5)
+    B3  Concepts Pair Shortest Chain       (depth-bounded — see SP note)
+    B4  Weighted Path Scoring              (Cypher-only, expressiveness boundary)
+    B5  Anchored Triangle                  (cyclic pattern)
+    B6  Neighborhood Degree Profile       (traversal feeding aggregation)
+FAMILY C (Global Retrieval)
+    C1  Concept Hubs Ranking               (full scan + one-pass grouping)
+    C2  Relation-ClassType Matrix          (stored vs. derived grouping key)
+FAMILY D (Schema and Integrity Findings)
+    D1  Violation Check                    (view vs. meta-graph anti-join)
+    D2  Invalid Insert                     — MANUAL write demo (read-only harness)
+    D3  Concept Delete                     — MANUAL write demo (read-only harness)
+
+DELIBERATE DEVIATIONS from the PDF texts (each forced by correctness):
+    * ORDER BY added before LIMIT in B1/B5/B6 — LIMIT without ORDER BY is
+      nondeterministic and could return different rows per system, which
+      would break cross-system verification.
+    * A1 drops the id(n)/node_id column: engine ids are non-isomorphic by
+      design (MySQL = load order, Memgraph = storage-assigned); the URI
+      is the identity, so it is the comparable key.
+    * B3 returns the hop count, not the path: a path is a sequence of
+      engine-internal ids (non-comparable); its length is the isomorphic
+      projection.
+    * B3's Cypher uses Memgraph's BFS expansion (*BFS..d); if this build
+      rejects the syntax, replace with *..d (same semantics, more paths
+      enumerated).
+
+SHORTEST-PATH DEPTH (SP_MAX_DEPTH, the '3-hop constant'): undirected,
+all-relation variable-length traversal enumerates walks exponentially in
+depth — ConceptNet's hubs multiply the frontier, the outer LIMIT cannot
+prune MySQL's recursive CTE (it is materialized fully first), and
+Memgraph's plain *..d enumerates all paths too. Depth 5 had to be killed
+after ~30 minutes and the memory blow-up froze the Docker VM. Hence ONE
+constant for both B3 and B4, default 3, overridable with --sp-depth.
+WHATEVER DEPTH YOU RUN: (a) verify the anchor pair is connected at that
+depth (inspect_query.py B3 must return >= 1 row, else the query
+benchmarks nothing), and (b) update Queries.pdf to match — the proposal
+must describe the executed experiment.
 
 Protocol: per query, WARMUP discarded runs + REPS measured runs
 (per-query overrides); median / min / max / mean / stdev reported.
 Results are verified across systems by canonicalized row-set hash.
 Plans (EXPLAIN ANALYZE / PROFILE) are captured for PLAN_QUERIES.
 
-TEMPLATE RULE (learned the hard way): query texts are templates whose
-{{token}} placeholders are substituted by QuerySpec.resolve(). They must
-therefore be built as PLAIN strings — never f-strings, because inside an
-f-string {{token}} renders to {token}, resolve() silently replaces
-nothing, and the engine receives literal brace junk (the bug behind the
-first run's 'syntax error near }' / 'mismatched input }' failures and the
-A0/A5 zero-row MISMATCHes). resolve() now also aborts on any leftover
-{identifier} as a permanent guard.
-
-The harness is READ-ONLY: D2/D3 (write demos) are intentionally manual
-so that this script can be re-run any number of times.
+TEMPLATE RULE: query texts are {{token}} templates substituted by
+QuerySpec.resolve(); they must be built as PLAIN strings, never
+f-strings (inside an f-string, {{token}} collapses to {token} and
+resolve() silently substitutes nothing). resolve() aborts on any
+leftover {identifier} as a permanent guard.
 
 Usage
     python benchmark.py                     # full battery, both systems
-    python benchmark.py --quick             # smoke test (3 reps)
-    python benchmark.py --queries A1,B1k4   # subset
+    python benchmark.py --quick             # smoke test (3 reps, 1 warm-up)
+    python benchmark.py --queries A2,B1k4   # subset
+    python benchmark.py --sp-depth 4        # B3/B4 depth override (careful!)
     python benchmark.py --mysql-only | --memgraph-only
     python benchmark.py --stratify-b1       # B1 over low/med/high-degree anchors
     python benchmark.py --no-plans --reps 20 --out-dir results/bench1
@@ -109,33 +133,36 @@ WARMUP = 2       # discarded repetitions
 
 OUT_DIR = "results"
 
-# Anchors — curated; existence and degree are verified at startup, and
-# queries whose anchors are missing are skipped with a recorded reason.
-# NOTE: a query where BOTH systems return 0 rows verifies OK but
-# benchmarks nothing — the harness warns, and you should substitute an
-# anchor that actually has data (check the anchor degree table).
+# Anchors — curated; existence is verified at startup (URIs against
+# nodes.uri, names against nodes.name), and queries whose anchors are
+# missing are skipped with a recorded reason.
+# !! A query where BOTH systems return 0 rows verifies OK but benchmarks
+# !! NOTHING — the harness warns. From the first quick run, A3/A4b/A5/A7
+# !! anchors were dead in this slice: run the anchor-finding queries in
+# !! the project notes and substitute before the final run.
 ANCHORS = {
-    "a0":  "photosynthesis",
-    "a1":  "photosynthesis",
-    "a2":  "cell",
-    "a2v": "cell",
-    "a2w": "cell",
-    "a3a": "laboratory",
-    "a3b": "abundant",
-    "a4a": "microscope",
-    "a4b": "beaker",
-    "a5lo": "cell", "a5hi": "gene",
-    "a6a": "enzyme", "a6b": "cell",
+    # A1 — URI anchor (identity-level lookup, per the final query list)
+    "a1_uri": "/c/en/photosynthesis/n",
+    # name anchors
+    "a2":  "photosynthesis",
+    "a3":  "cell",
+    "a4a": "laboratory",
+    "a4b": "abundant",
+    "a5a": "microscope", "a5b": "beaker",
+    "a6lo": "cell", "a6hi": "gene",
+    "a7a": "enzyme", "a7b": "cell",
     "b1":  "enzyme",
     "b2":  "mitochondrion",
-    "b2v": "mitochondrion",
     "b3a": "chlorophyll", "b3b": "sunlight",
     "b4a": "chlorophyll", "b4b": "sunlight",
     "b5":  "enzyme",
     "b6":  "enzyme",
-    "c1v_rel": "UsedFor",
-    "a3a_rel": "AtLocation", "a3b_rel": "Antonym", "a4_rel": "AtLocation",
-    "a6_rel": "AtLocation", "b2_rel": "IsA",
+    # relation names (for the Cypher edge types)
+    "a3_rel": "CapableOf",
+    "a4a_rel": "AtLocation", "a4b_rel": "Antonym",
+    "a5_rel": "AtLocation",
+    "a7_rel": "AtLocation",
+    "b2_rel": "IsA",
 }
 
 # Relation ids (must match conceptnet_schema.sql)
@@ -143,12 +170,16 @@ REL_IDS = {"Antonym": 1, "AtLocation": 2, "CapableOf": 3, "DefinedAs": 7,
            "HasProperty": 20, "IsA": 23, "PartOf": 31, "RelatedTo": 33,
            "UsedFor": 37}
 
-MIN_W   = 0.5     # weight filter for B1
-MAX_D   = 5       # depth bound for B2/B2v/B3
-MAX_D4  = 4       # depth bound for B4
+MIN_W = 0.5        # weight filter for B1
+
+B2_MAX_DEPTH = 5   # transitive closure: single relation -> bounded fan-out
+SP_MAX_DEPTH = 3   # shortest path family (B3/B4): all relations ->
+                   # EXPONENTIAL fan-out; see the docstring incident note.
+                   # Override with --sp-depth; update Queries.pdf to match.
 
 # Queries whose physical plans are captured into plans/
-PLAN_QUERIES = {"A1", "A3b", "A5", "A6", "B1k2", "B1k4", "B5", "B6", "C1", "C2"}
+PLAN_QUERIES = {"A2", "A4b", "A6", "A7", "B1k2", "B1k4", "B5", "B6",
+                "C1", "C2"}
 
 # Degree pool used when --stratify-b1 is given
 B1_STRAT_POOL = ["enzyme", "cell", "gene", "protein", "animal",
@@ -173,8 +204,9 @@ class QuerySpec:
     sql: str = None
     cypher: str = None
     params: dict = field(default_factory=dict)
-    reps: int = REPS
-    warmup: int = WARMUP
+    reps: int = 0      # 0 = use the global protocol value (resolved in
+    warmup: int = 0    # build_specs AFTER --quick/--reps are applied; a
+                       # literal default here would freeze at import time)
     verify: bool = True
     note: str = ""
     plan: bool = False
@@ -205,6 +237,8 @@ def b1_pair(k):
     QuerySpec.resolve() substitutes. Inside an f-string, {{minw}}
     renders to {minw}, resolve() silently replaces nothing, and the
     engine receives literal brace junk.
+    ORDER BY name is added before LIMIT so the 100-row window is
+    deterministic and therefore comparable across systems.
     """
     joins = ["JOIN edges e1 ON e1.subject_id = n.node_id"]
     wfilt, cw = [], []
@@ -237,20 +271,22 @@ NODE_TYPE_CASE = ("CASE WHEN n:EntityNode THEN 'EntityNode' "
 def build_specs(stratify_b1=False, b1_anchors=None):
     p = ANCHORS
     specs = [
+        # ---------------- FAMILY A — local retrieval ----------------------
         QuerySpec(
-            "A0", "A", "equality selection via index (baseline)", "tie",
+            "A1", "A", "equality selection on the unique key (baseline)", "tie",
             sql="""SELECT uri, name, node_type, label_source
-FROM nodes WHERE name = '{{anchor}}'
-ORDER BY uri LIMIT 4""",
-            cypher="""MATCH (n:Concept {name: '{{anchor}}'})
+FROM nodes WHERE uri = '{{anchor_uri}}'""",
+            cypher="""MATCH (n:Concept {uri: '{{anchor_uri}}'})
 RETURN n.uri AS uri, n.name AS name,
-       {{node_type_case}} AS node_type, n.label_source AS label_source
-ORDER BY uri LIMIT 4""",
-            params={"anchor": p["a0"], "node_type_case": NODE_TYPE_CASE},
-            note="the noise floor of the benchmark"),
+       {{node_type_case}} AS node_type, n.label_source AS label_source""",
+            params={"anchor_uri": p["a1_uri"],
+                    "node_type_case": NODE_TYPE_CASE},
+            note="PDF also selects id(n)/node_id; dropped because engine "
+                 "ids are non-isomorphic by design (MySQL = load order, "
+                 "Memgraph = storage-assigned) — the URI is the identity"),
 
         QuerySpec(
-            "A1", "A", "1-hop fan-out + tuple reassembly", "slight graph",
+            "A2", "A", "1-hop fan-out + tuple reassembly (join-backs)", "slight graph",
             sql="""SELECT s.name AS subject, r.relation_name AS relation,
        o.name AS object, e.weight AS weight
 FROM nodes s
@@ -262,10 +298,10 @@ ORDER BY weight DESC, relation, object LIMIT 25""",
             cypher="""MATCH (n:Concept {name: '{{anchor}}'})-[r]->(m:Concept)
 RETURN n.name AS subject, type(r) AS relation, m.name AS object, r.weight AS weight
 ORDER BY weight DESC, relation, object LIMIT 25""",
-            params={"anchor": p["a1"]}, plan=True),
+            params={"anchor": p["a2"]}, plan=True),
 
         QuerySpec(
-            "A2", "A", "discriminated access (relation id vs. label)", "tie",
+            "A3", "A", "discriminated access (relation id vs. edge type)", "tie",
             sql="""SELECT o.name AS action
 FROM nodes s
 JOIN edges e ON e.subject_id = s.node_id
@@ -275,41 +311,11 @@ ORDER BY action""",
             cypher="""MATCH (:Concept {name: '{{anchor}}'})-[:{{rel_name}}]->(a:ActionEventNode)
 RETURN a.name AS action
 ORDER BY action""",
-            params={"anchor": p["a2"], "rel": REL_IDS["CapableOf"],
-                    "rel_name": "CapableOf"}),
+            params={"anchor": p["a3"], "rel": REL_IDS["CapableOf"],
+                    "rel_name": p["a3_rel"]}),
 
         QuerySpec(
-            "A2v", "A", "multi-class relation (DefinedAs) — UNION-penalty control", "tie",
-            sql="""SELECT o.name AS target
-FROM nodes s
-JOIN edges e ON e.subject_id = s.node_id
-JOIN nodes o ON o.node_id = e.object_id
-WHERE s.name = '{{anchor}}' AND e.relation_id = {{rel}}
-ORDER BY target""",
-            cypher="""MATCH (:Concept {name: '{{anchor}}'})-[:{{rel_name}}]->(t)
-RETURN t.name AS target
-ORDER BY target""",
-            params={"anchor": p["a2v"], "rel": REL_IDS["DefinedAs"],
-                    "rel_name": "DefinedAs"},
-            note="old 9-table design needed a UNION here; single table does not"),
-
-        QuerySpec(
-            "A2w", "A", "+ weight-range predicate (non-indexed filter)", "tie",
-            sql="""SELECT o.name AS action
-FROM nodes s
-JOIN edges e ON e.subject_id = s.node_id
-JOIN nodes o ON o.node_id = e.object_id
-WHERE s.name = '{{anchor}}' AND e.relation_id = {{rel}} AND e.weight >= {{minw}}
-ORDER BY action""",
-            cypher="""MATCH (:Concept {name: '{{anchor}}'})-[r:{{rel_name}}]->(a)
-WHERE r.weight >= {{minw}}
-RETURN a.name AS action
-ORDER BY action""",
-            params={"anchor": p["a2w"], "rel": REL_IDS["CapableOf"],
-                    "rel_name": "CapableOf", "minw": 1.0}),
-
-        QuerySpec(
-            "A3a", "A", "reverse-direction access (second index vs. free)", "tie",
+            "A4a", "A", "directed (reverse) 1-hop: second index vs. free adjacency", "tie",
             sql="""SELECT s.name AS thing
 FROM nodes o
 JOIN edges e ON e.object_id = o.node_id
@@ -319,11 +325,11 @@ ORDER BY thing""",
             cypher="""MATCH (thing:Concept)-[:{{rel_name}}]->(:Concept {name: '{{anchor}}'})
 RETURN thing.name AS thing
 ORDER BY thing""",
-            params={"anchor": p["a3a"], "rel": REL_IDS["AtLocation"],
-                    "rel_name": p["a3a_rel"]}),
+            params={"anchor": p["a4a"], "rel": REL_IDS["AtLocation"],
+                    "rel_name": p["a4a_rel"]}),
 
         QuerySpec(
-            "A3b", "A", "undirected access (OR predicate vs. one pattern)", "graph",
+            "A4b", "A", "undirected 1-hop: OR predicate vs. one pattern", "graph",
             sql="""SELECT CASE WHEN e.subject_id = n.node_id THEN o.name ELSE s.name END AS neighbor
 FROM nodes n
 JOIN edges e ON (e.subject_id = n.node_id OR e.object_id = n.node_id)
@@ -334,29 +340,29 @@ ORDER BY neighbor""",
             cypher="""MATCH (:Concept {name: '{{anchor}}'})-[:{{rel_name}}]-(y:Concept)
 RETURN y.name AS neighbor
 ORDER BY neighbor""",
-            params={"anchor": p["a3b"], "rel": REL_IDS["Antonym"],
-                    "rel_name": p["a3b_rel"]},
+            params={"anchor": p["a4b"], "rel": REL_IDS["Antonym"],
+                    "rel_name": p["a4b_rel"]},
             note="ConceptNet stores symmetric relations reciprocally", plan=True),
 
         QuerySpec(
-            "A4", "A", "two-anchor intersection (join topology in pattern)", "tie (readability: graph)",
+            "A5", "A", "two-anchor intersection (join topology in the pattern)", "tie (readability: graph)",
             sql="""SELECT loc.name AS shared
 FROM nodes a
-JOIN nodes b ON b.name = '{{anchor_b}}'
 JOIN edges e1 ON e1.subject_id = a.node_id AND e1.relation_id = {{rel}}
-JOIN edges e2 ON e2.subject_id = b.node_id AND e2.relation_id = {{rel}}
+JOIN edges e2 ON e2.object_id = e1.object_id AND e2.relation_id = {{rel}}
+JOIN nodes b  ON b.node_id = e2.subject_id AND b.name = '{{anchor_b}}'
 JOIN nodes loc ON loc.node_id = e1.object_id
-WHERE a.name = '{{anchor_a}}' AND e2.object_id = e1.object_id
+WHERE a.name = '{{anchor_a}}'
 ORDER BY shared""",
             cypher="""MATCH (a:Concept {name: '{{anchor_a}}'})-[:{{rel_name}}]->(loc:Concept)
       <-[:{{rel_name}}]-(b:Concept {name: '{{anchor_b}}'})
 RETURN loc.name AS shared
 ORDER BY shared""",
-            params={"anchor_a": p["a4a"], "anchor_b": p["a4b"],
-                    "rel": REL_IDS["AtLocation"], "rel_name": p["a4_rel"]}),
+            params={"anchor_a": p["a5a"], "anchor_b": p["a5b"],
+                    "rel": REL_IDS["AtLocation"], "rel_name": p["a5_rel"]}),
 
         QuerySpec(
-            "A5", "A", "range selection on a sorted index", "MySQL",
+            "A6", "A", "range selection on a sorted index", "MySQL",
             sql="""SELECT name, node_type FROM nodes
 WHERE name BETWEEN '{{lo}}' AND '{{hi}}'
 ORDER BY name""",
@@ -364,13 +370,13 @@ ORDER BY name""",
 WHERE n.name >= '{{lo}}' AND n.name <= '{{hi}}'
 RETURN n.name AS name, {{node_type_case}} AS node_type
 ORDER BY name""",
-            params={"lo": p["a5lo"], "hi": p["a5hi"],
+            params={"lo": p["a6lo"], "hi": p["a6hi"],
                     "node_type_case": NODE_TYPE_CASE},
             note="B+ tree: O(log B + fs*B); check PROFILE for index-vs-scan",
             plan=True),
 
         QuerySpec(
-            "A6", "A", "set difference (anti-join vs. negated pattern)", "near tie (readability: graph)",
+            "A7", "A", "set difference (anti-join vs. negated pattern)", "near tie (readability: graph)",
             sql="""SELECT DISTINCT s.name AS name
 FROM edges e
 JOIN nodes s ON s.node_id = e.subject_id
@@ -386,12 +392,13 @@ ORDER BY name""",
 WHERE NOT (x)-[:{{rel_name}}]->(:Concept {name: '{{anchor_b}}'})
 RETURN DISTINCT x.name AS name
 ORDER BY name""",
-            params={"anchor_a": p["a6a"], "anchor_b": p["a6b"],
-                    "rel": REL_IDS["AtLocation"], "rel_name": p["a6_rel"]},
-            note="the relational set-difference operator, live", plan=True),
+            params={"anchor_a": p["a7a"], "anchor_b": p["a7b"],
+                    "rel": REL_IDS["AtLocation"], "rel_name": p["a7_rel"]},
+            note="PDF form 2 (anti-join) — better for plan inspection; "
+                 "form 1 (EXCEPT) is equivalent", plan=True),
     ]
 
-    # --- B family ----------------------------------------------------------
+    # ---------------- FAMILY B — traversal paths --------------------------
     b1_list = b1_anchors if (stratify_b1 and b1_anchors) else [p["b1"]]
     for anchor in b1_list:
         base = "B1" if len(b1_list) == 1 else f"B1[{anchor}]"
@@ -423,31 +430,11 @@ ORDER BY superclass""",
 RETURN DISTINCT sup.name AS superclass
 ORDER BY superclass""",
             params={"anchor": p["b2"], "rel": REL_IDS["IsA"],
-                    "rel_name": p["b2_rel"], "maxd": MAX_D},
+                    "rel_name": p["b2_rel"], "maxd": B2_MAX_DEPTH},
             note="CTE needs the manual depth bound as cycle guard"),
 
         QuerySpec(
-            "B2v", "B", "bounded RPQ with alternation (IsA|PartOf)", "graph, modest",
-            sql="""WITH RECURSIVE anc(node_id, depth) AS (
-    SELECT node_id, 0 FROM nodes WHERE name = '{{anchor}}'
-    UNION ALL
-    SELECT e.object_id, a.depth + 1
-    FROM anc a JOIN edges e ON e.subject_id = a.node_id
-    WHERE e.relation_id IN {{relset}} AND a.depth < {{maxd}}
-)
-SELECT DISTINCT n.name AS ancestor
-FROM anc a JOIN nodes n ON n.node_id = a.node_id
-WHERE a.depth > 0
-ORDER BY ancestor""",
-            cypher="""MATCH (:Concept {name: '{{anchor}}'})-[:{{relset_name}}*1..{{maxd}}]->(sup:Concept)
-RETURN DISTINCT sup.name AS ancestor
-ORDER BY ancestor""",
-            params={"anchor": p["b2v"], "relset": "(23, 31)",
-                    "relset_name": "IsA|PartOf", "maxd": MAX_D},
-            note="alternation = IN-list in the CTE; unbounded + has no SQL form"),
-
-        QuerySpec(
-            "B3", "B", "shortest path, undirected, any relation", "graph (expressiveness)",
+            "B3", "B", "shortest chain, undirected, any relation (depth-bounded)", "graph (expressiveness)",
             sql="""WITH RECURSIVE walk(node_id, depth, path) AS (
     SELECT node_id, 0, CAST(node_id AS CHAR(2000))
     FROM nodes WHERE name = '{{anchor_a}}'
@@ -463,12 +450,16 @@ ORDER BY ancestor""",
 SELECT depth AS hops FROM walk
 WHERE node_id IN (SELECT node_id FROM nodes WHERE name = '{{anchor_b}}')
 ORDER BY depth, path LIMIT 1""",
-            cypher="""MATCH p = (a:Concept {name: '{{anchor_a}}'})-[r*..{{maxd}}]-(b:Concept {name: '{{anchor_b}}'})
+            cypher="""MATCH p = (a:Concept {name: '{{anchor_a}}'})-[r*BFS..{{maxd}}]-(b:Concept {name: '{{anchor_b}}'})
 RETURN length(p) AS hops
 ORDER BY hops LIMIT 1""",
-            params={"anchor_a": p["b3a"], "anchor_b": p["b3b"], "maxd": MAX_D},
+            params={"anchor_a": p["b3a"], "anchor_b": p["b3b"],
+                    "maxd": SP_MAX_DEPTH},
             reps=3, warmup=1,
-            note="SQL: string visited-set (FIND_IN_SET) + direction union"),
+            note="returns hops, not the path (paths contain engine ids); "
+                 "*BFS explores level by level (if this build rejects "
+                 "*BFS, use *..{{maxd}}); depth is SP_MAX_DEPTH — keep "
+                 "Queries.pdf in sync with whatever you run"),
 
         QuerySpec(
             "B4", "B", "weighted path scoring — expressiveness boundary", "no SQL counterpart",
@@ -476,8 +467,11 @@ ORDER BY hops LIMIT 1""",
             cypher="""MATCH p = (a:Concept {name: '{{anchor_a}}'})-[r*..{{maxd}}]->(b:Concept {name: '{{anchor_b}}'})
 RETURN p, reduce(acc = 1.0, rel IN relationships(p) | acc * rel.weight) AS score
 ORDER BY score DESC LIMIT 5""",
-            params={"anchor_a": p["b4a"], "anchor_b": p["b4b"], "maxd": MAX_D4},
-            reps=3, warmup=1, verify=False),
+            params={"anchor_a": p["b4a"], "anchor_b": p["b4b"],
+                    "maxd": SP_MAX_DEPTH},
+            reps=3, warmup=1, verify=False,
+            note="reduce() over native path objects; depth-bounded for "
+                 "the same exponential reason as B3"),
 
         QuerySpec(
             "B5", "B", "anchored triangle (cyclic pattern)", "graph, clearly",
@@ -492,7 +486,9 @@ ORDER BY hop1, hop2 LIMIT 200""",
 RETURN DISTINCT y.name AS hop1, z.name AS hop2
 ORDER BY hop1, hop2 LIMIT 200""",
             params={"anchor": p["b5"]}, reps=5,
-            note="hub-sensitive: mid-degree anchor chosen", plan=True),
+            note="hub-sensitive: mid-degree anchor; LIMIT 200 + ORDER BY "
+                 "added to the PDF text for determinism and safety",
+            plan=True),
 
         QuerySpec(
             "B6", "B", "traversal feeding aggregation (bags vs sets!)", "graph, moderate",
@@ -508,32 +504,21 @@ ORDER BY out_degree DESC, name LIMIT 50""",
 RETURN nbr.name AS name, count(DISTINCT r2) AS out_degree
 ORDER BY out_degree DESC, name LIMIT 50""",
             params={"anchor": p["b6"]},
-            note="COUNT(DISTINCT) on both sides: the anchor->neighbor join is a bag",
+            note="COUNT(DISTINCT) on both sides: the anchor->neighbor "
+                 "join is a bag; LIMIT 50 added for safety",
             plan=True),
 
+        # ---------------- FAMILY C — global retrieval ----------------------
         QuerySpec(
             "C1", "C", "hub ranking (full scan + one-pass grouping)", "MySQL",
-            sql="""SELECT n.name AS name, COUNT(*) AS out_degree
+            sql="""SELECT n.uri, n.name, COUNT(*) AS out_degree
 FROM edges e JOIN nodes n ON n.node_id = e.subject_id
-GROUP BY n.node_id, n.name
-ORDER BY out_degree DESC, name LIMIT 10""",
+GROUP BY n.uri, n.name
+ORDER BY out_degree DESC LIMIT 10;""",
             cypher="""MATCH (n:Concept)-[r]->(:Concept)
-RETURN n.name AS name, count(r) AS out_degree
-ORDER BY out_degree DESC, name LIMIT 10""",
+RETURN n.uri AS uri, n.name AS name, count(r) AS out_degree
+ORDER BY out_degree DESC, uri LIMIT 10;""",
             plan=True, note="the honest pro-SQL row"),
-
-        QuerySpec(
-            "C1v", "C", "relation-scoped aggregation (index prefix / edge type)", "MySQL",
-            sql="""SELECT n.name AS name, COUNT(*) AS n_used
-FROM edges e JOIN nodes n ON n.node_id = e.object_id
-WHERE e.relation_id = {{rel}}
-GROUP BY n.node_id, n.name
-ORDER BY n_used DESC, name LIMIT 50""",
-            cypher="""MATCH ()-[r:{{rel_name}}]->(n:Concept)
-RETURN n.name AS name, count(r) AS n_used
-ORDER BY n_used DESC, name LIMIT 50""",
-            params={"rel": REL_IDS["UsedFor"], "rel_name": p["c1v_rel"]},
-            note="old draft query 6; index-only evaluation candidate"),
 
         QuerySpec(
             "C2", "C", "stored vs. derived grouping key (relation x class)", "either — trade-off is the finding",
@@ -550,8 +535,9 @@ RETURN type(r) AS relation,
 ORDER BY n_edges DESC, relation, edge_class""",
             plan=True, note="output = the table behind Lab's schema view"),
 
+        # ---------------- FAMILY D — schema and integrity -----------------
         QuerySpec(
-            "D1", "D", "contract conformance (view vs. meta-graph anti-join)", "qualitative",
+            "D1", "D", "violation check (view vs. meta-graph anti-join)", "qualitative",
             sql="""SELECT COUNT(*) AS violations FROM v_edges WHERE NOT permitted""",
             cypher="""MATCH (s:Concept)-[r]->(o:Concept)
 MATCH (rt:Schema:RelationType {name: type(r)})
@@ -560,8 +546,16 @@ OPTIONAL MATCH (rt)-[:PERMITS]->(c:Schema:EdgeClass)
                (CASE WHEN o:EntityNode THEN 'E' WHEN o:ActionEventNode THEN 'A' ELSE 'P' END)
 WITH r, c WHERE c IS NULL
 RETURN count(r) AS violations""",
-            note="expect 0 on both sides under STRICT_CONTRACT", plan=False),
+            note="expect 0 on both sides under STRICT_CONTRACT; D2/D3 are "
+                 "manual write demos by design", plan=False),
     ]
+
+    # resolve the protocol sentinels AFTER --quick/--reps have been applied
+    for s in specs:
+        if not s.reps:
+            s.reps = REPS
+        if not s.warmup:
+            s.warmup = WARMUP
     return specs
 
 
@@ -696,6 +690,7 @@ def collect_env(conn, session):
         "platform": platform.platform(),
         "cpus": os.cpu_count(),
         "reps": REPS, "warmup": WARMUP,
+        "sp_depth": SP_MAX_DEPTH,
     }
     try:
         cur = conn.cursor()
@@ -723,19 +718,33 @@ def collect_env(conn, session):
 
 
 def anchor_prep(conn):
-    """Existence + out-degree of every anchor used by the battery."""
-    names = sorted({v for k, v in ANCHORS.items()
-                    if not k.endswith("_rel")})
+    """
+    Existence + out-degree of every anchor used by the battery.
+    URI anchors (values starting with '/c/') are checked against
+    nodes.uri; name anchors against nodes.name. Out-degrees are computed
+    for names only (they feed --stratify-b1 and the report's degree table).
+    """
+    values = sorted({v for k, v in ANCHORS.items()
+                     if not k.endswith("_rel")})
+    uris = [v for v in values if v.startswith("/c/")]
+    names = [v for v in values if not v.startswith("/c/")]
     cur = conn.cursor()
-    fmt = ",".join(["%s"] * len(names))
-    cur.execute(f"SELECT name FROM nodes WHERE name IN ({fmt})", names)
-    present = {r[0] for r in cur.fetchall()}
-    cur.execute(f"""SELECT n.name, COUNT(*) FROM edges e
-                    JOIN nodes n ON n.node_id = e.subject_id
-                    WHERE n.name IN ({fmt}) GROUP BY n.name""", names)
-    degrees = dict(cur.fetchall())
+    present = set()
+    if uris:
+        fmt = ",".join(["%s"] * len(uris))
+        cur.execute(f"SELECT uri FROM nodes WHERE uri IN ({fmt})", uris)
+        present |= {r[0] for r in cur.fetchall()}
+    degrees = {}
+    if names:
+        fmt = ",".join(["%s"] * len(names))
+        cur.execute(f"SELECT name FROM nodes WHERE name IN ({fmt})", names)
+        present |= {r[0] for r in cur.fetchall()}
+        cur.execute(f"""SELECT n.name, COUNT(*) FROM edges e
+                        JOIN nodes n ON n.node_id = e.subject_id
+                        WHERE n.name IN ({fmt}) GROUP BY n.name""", names)
+        degrees = dict(cur.fetchall())
     cur.close()
-    missing = [n for n in names if n not in present]
+    missing = [v for v in values if v not in present]
     return present, degrees, missing
 
 
@@ -842,7 +851,8 @@ def write_outputs(out_dir, results, specs, env, storage, anchors_info):
     lines.append("# Benchmark results — MySQL vs Memgraph (ConceptNet typed subgraph)\n")
     lines.append(f"* generated: {env.get('date')}")
     lines.append(f"* protocol: {env.get('warmup')} warm-up runs discarded, "
-                 f"{env.get('reps')} measured, median reported")
+                 f"{env.get('reps')} measured, median reported; "
+                 f"shortest-path depth (B3/B4) = {env.get('sp_depth')}")
     lines.append(f"* MySQL {env.get('mysql_version')} "
                  f"(buffer pool {env.get('innodb_buffer_pool_mb', '?')} MB, warm) · "
                  f"Memgraph {env.get('memgraph_version')} (in-RAM)")
@@ -915,10 +925,10 @@ def write_outputs(out_dir, results, specs, env, storage, anchors_info):
     lines.append("```\n")
 
     lines.append("## Reading guide (one line per family)\n")
-    lines.append("* A0 is the noise floor: read every other number relative to it.")
-    lines.append("* A1 minus A0 = tuple reassembly (join-backs); B1 slope = "
+    lines.append("* A1 is the noise floor: read every other number relative to it.")
+    lines.append("* A2 minus A1 = tuple reassembly (join-backs); the B1 slope = "
                  "index-join chain vs. pointer traversal — the headline figure.")
-    lines.append("* A3a tie means SQL *prepaid* for it (ix_obj); A5/B1 plans: "
+    lines.append("* A4a tie means SQL *prepaid* for it (ix_obj); A6/B1 plans: "
                  "look for 'range'/'ref' vs 'ScanAll'.")
     lines.append("* C1 is expected to favor SQL — it keeps the table honest.")
     lines.append("* D1 is qualitative: both 0 under STRICT_CONTRACT; D2/D3 "
@@ -965,12 +975,16 @@ def write_outputs(out_dir, results, specs, env, storage, anchors_info):
 # ---------------------------------------------------------------------------
 
 def main():
-    global REPS, WARMUP
+    global REPS, WARMUP, SP_MAX_DEPTH
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reps", type=int, default=REPS)
     ap.add_argument("--warmup", type=int, default=WARMUP)
     ap.add_argument("--quick", action="store_true", help="3 reps, 1 warm-up")
+    ap.add_argument("--sp-depth", type=int, default=SP_MAX_DEPTH,
+                    help="depth bound for B3/B4 (shortest-path family); "
+                         "default 3 — raising it re-enters the exponential "
+                         "regime that froze Docker at depth 5")
     ap.add_argument("--queries", default=None, help="comma-separated qids")
     ap.add_argument("--out-dir", default=OUT_DIR)
     ap.add_argument("--mysql-only", action="store_true")
@@ -984,6 +998,7 @@ def main():
         REPS, WARMUP = 3, 1
     else:
         REPS, WARMUP = args.reps, args.warmup
+    SP_MAX_DEPTH = args.sp_depth
 
     conn = session = driver = None
     want_mysql = not args.memgraph_only
@@ -1039,7 +1054,8 @@ def main():
 
     results = []
     print(f"\nRunning {len(runnable)} queries "
-          f"(warmup={WARMUP}, reps={REPS}, plans={'on' if not args.no_plans else 'off'})\n")
+          f"(warmup={WARMUP}, reps={REPS}, sp_depth={SP_MAX_DEPTH}, "
+          f"plans={'on' if not args.no_plans else 'off'})\n")
 
     for spec in runnable:
         print(f"[{spec.qid}] {spec.mechanism} ...", flush=True)
@@ -1098,8 +1114,8 @@ def main():
 
         if spec_rows and all(r == 0 for r in spec_rows):
             print(f"    [WARN] both systems returned 0 rows — this query "
-                  f"benchmarks nothing; consider a different anchor "
-                  f"(edit ANCHORS['{spec.qid.lower().rstrip('abvw')}'])")
+                  f"benchmarks nothing; consider different anchors "
+                  f"(edit ANCHORS at the top of this file)")
 
         # incremental save: a Ctrl-C keeps everything measured so far
         write_outputs(args.out_dir, results, runnable, env,

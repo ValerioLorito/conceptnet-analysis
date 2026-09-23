@@ -9,14 +9,14 @@ WHERE n.name = 'abundant' AND e.relation_id = 1
 ORDER BY neighbor
 
 ---- PLAN ----
--> Sort: neighbor  (actual time=1.48..1.48 rows=0 loops=1)
-    -> Stream results  (cost=4542 rows=0.12) (actual time=1.47..1.47 rows=0 loops=1)
-        -> Nested loop inner join  (cost=4542 rows=0.12) (actual time=1.47..1.47 rows=0 loops=1)
-            -> Nested loop inner join  (cost=4542 rows=0.12) (actual time=1.47..1.47 rows=0 loops=1)
-                -> Nested loop inner join  (cost=4542 rows=0.12) (actual time=1.47..1.47 rows=0 loops=1)
-                    -> Covering index lookup on n using idx_nodes_name (name='abundant')  (cost=1.2 rows=2) (actual time=0.00283..0.00321 rows=2 loops=1)
-                    -> Filter: ((e.subject_id = n.node_id) or (e.object_id = n.node_id))  (cost=2026 rows=0.06) (actual time=0.735..0.735 rows=0 loops=2)
-                        -> Index lookup on e using idx_rel_class (relation_id=1)  (cost=2026 rows=2442) (actual time=0.0526..0.653 rows=2442 loops=2)
-                -> Single-row index lookup on s using PRIMARY (node_id=e.subject_id)  (cost=0.958 rows=1) (never executed)
-            -> Single-row index lookup on o using PRIMARY (node_id=e.object_id)  (cost=0.958 rows=1) (never executed)
+-> Sort: neighbor  (actual time=1.44..1.44 rows=0 loops=1)
+    -> Stream results  (cost=5302 rows=0.12) (actual time=1.44..1.44 rows=0 loops=1)
+        -> Nested loop inner join  (cost=5302 rows=0.12) (actual time=1.44..1.44 rows=0 loops=1)
+            -> Nested loop inner join  (cost=5302 rows=0.12) (actual time=1.44..1.44 rows=0 loops=1)
+                -> Nested loop inner join  (cost=5302 rows=0.12) (actual time=1.44..1.44 rows=0 loops=1)
+                    -> Covering index lookup on n using idx_nodes_name (name='abundant')  (cost=1.3 rows=2) (actual time=0.00167..0.00204 rows=2 loops=1)
+                    -> Filter: ((e.subject_id = n.node_id) or (e.object_id = n.node_id))  (cost=2406 rows=0.06) (actual time=0.72..0.72 rows=0 loops=2)
+                        -> Index lookup on e using idx_rel_class (relation_id=1)  (cost=2406 rows=2442) (actual time=0.0518..0.627 rows=2442 loops=2)
+                -> Single-row index lookup on s using PRIMARY (node_id=e.subject_id)  (cost=1.33 rows=1) (never executed)
+            -> Single-row index lookup on o using PRIMARY (node_id=e.object_id)  (cost=1.33 rows=1) (never executed)
 

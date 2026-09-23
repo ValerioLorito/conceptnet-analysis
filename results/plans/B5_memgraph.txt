@@ -1,0 +1,8 @@
+-- B5 (memgraph) anchored triangle (cyclic pattern)
+
+MATCH (a:Concept {name: 'enzyme'})-[]->(y:Concept)-[]->(z:Concept)-[]->(a)
+RETURN DISTINCT y.name AS hop1, z.name AS hop2
+ORDER BY hop1, hop2 LIMIT 200
+
+---- PLAN ----
+* None

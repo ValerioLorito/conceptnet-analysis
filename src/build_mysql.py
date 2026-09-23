@@ -37,9 +37,13 @@ Stored vs derived (the relational answer to "where is the schema?"):
                   chk_edges_class + the composite FKs to nodes(node_id,
                   node_type) reject bad input with errors 3819 / 1452;
     permitted     NOT stored — derived by view v_edges from
-                  relation_class_perms. The static relation->class schema
-                  is asserted at startup against
-                  label_concepts.RELATION_TO_EDGE_CLASSES.
+                  relation_class_perms. The contract's SQL materializations
+                  are BOTH asserted at startup: relation_edge_classes
+                  against label_concepts.RELATION_TO_EDGE_CLASSES
+                  (sync_check), and relation_class_perms against the
+                  ALL-expansion of relation_edge_classes
+                  (check_perms_expansion — added after the 61,416
+                  phantom-violations incident).
 
 Run order
     1. python label_concepts.py          (produces the two CSVs)
@@ -258,6 +262,58 @@ def sync_check(cursor):
           f"({grants} grants over {len(py_map)} relations)")
 
 
+def check_perms_expansion(cursor):
+    """
+    Assert relation_class_perms == the ALL-expansion of relation_edge_classes.
+
+    Added after the '61,416 phantom violations' incident: this table is
+    what v_edges reads, and nothing verified it — a stale expansion flags
+    legal edges as violations (false D1 positives) or, in faithful mode,
+    hides real ones. BIDIRECTIONAL on purpose: missing grants AND extra
+    grants both abort the load.
+    """
+    cursor.execute("""
+        SELECT rec.relation_id, ec.edge_class
+        FROM relation_edge_classes rec
+        JOIN edge_classes ec ON ec.edge_class <> 'ALL'
+        WHERE rec.edge_class = 'ALL'
+        UNION
+        SELECT relation_id, edge_class
+        FROM relation_edge_classes
+        WHERE edge_class <> 'ALL'
+    """)
+    expected = {(rid, cls) for rid, cls in cursor.fetchall()}
+
+    cursor.execute("SELECT relation_id, edge_class FROM relation_class_perms")
+    actual = {(rid, cls) for rid, cls in cursor.fetchall()}
+
+    if expected == actual:
+        print(f"  perms ok: relation_class_perms == expansion of "
+              f"relation_edge_classes ({len(actual)} grants)")
+        return
+
+    cursor.execute("SELECT relation_id, relation_name FROM relations")
+    names = {rid: name for rid, name in cursor.fetchall()}
+    missing = sorted(f"{names.get(r, str(r))}:{c}" for r, c in expected - actual)
+    extra = sorted(f"{names.get(r, str(r))}:{c}" for r, c in actual - expected)
+    parts = []
+    if missing:
+        parts.append(f"missing {len(missing)} grant(s): "
+                     + ", ".join(missing[:8])
+                     + ("..." if len(missing) > 8 else ""))
+    if extra:
+        parts.append(f"extra {len(extra)} grant(s): "
+                     + ", ".join(extra[:8])
+                     + ("..." if len(extra) > 8 else ""))
+    raise SystemExit(
+        "relation_class_perms is out of sync with the ALL-expansion of "
+        "relation_edge_classes (" + "; ".join(parts) + ").\n"
+        "v_edges derives `permitted` from this table, so the desync either "
+        "flags legal edges as violations or hides real ones.\n"
+        "Fix: re-apply conceptnet_schema.sql (it rebuilds the expansion "
+        "from relation_edge_classes), then re-run.")
+
+
 def fetch_reference_sets(cursor):
     cursor.execute("SELECT relation_id, relation_name FROM relations")
     rel2id = {name: rid for rid, name in cursor.fetchall()}
@@ -438,8 +494,7 @@ def load_edges(conn, cursor, edges, row_alias):
       * error 1064 on `INSERT INTO edges AS e (...)`: MySQL's INSERT
         grammar has no table-alias slot — qualification must use the plain
         table name (`edges.weight`), which is exactly the manual's
-        documented form (INSERT INTO t1 (...) VALUES (...) AS new ON
-        DUPLICATE KEY UPDATE t1.a = new.a).
+        documented form.
 
     Legacy dialect (MariaDB, MySQL < 8.0.19): VALUES(col) — with no row
     alias there is a single namespace, so unqualified weight is fine.
@@ -600,6 +655,7 @@ def main():
                  else "VALUES() (legacy form)"))
         check_collation(cursor)
         sync_check(cursor)
+        check_perms_expansion(cursor)
         rel2id, sources = fetch_reference_sets(cursor)
 
         bad_sources = sorted({n[4] for n in nodes} - sources)
