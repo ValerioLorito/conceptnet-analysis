@@ -1,0 +1,23 @@
+-- A1 (mysql) 1-hop fan-out + tuple reassembly
+
+SELECT s.name AS subject, r.relation_name AS relation,
+       o.name AS object, e.weight AS weight
+FROM nodes s
+JOIN edges e     ON e.subject_id = s.node_id
+JOIN nodes o     ON o.node_id = e.object_id
+JOIN relations r ON r.relation_id = e.relation_id
+WHERE s.name = 'photosynthesis'
+ORDER BY weight DESC, relation, object LIMIT 25
+
+---- PLAN ----
+-> Limit: 25 row(s)  (actual time=0.0667..0.0683 rows=22 loops=1)
+    -> Sort: e.weight DESC, r.relation_name, o.`name`, limit input to 25 row(s) per chunk  (actual time=0.0665..0.0675 rows=22 loops=1)
+        -> Stream results  (cost=11.6 rows=6.22) (actual time=0.0155..0.0445 rows=22 loops=1)
+            -> Nested loop inner join  (cost=11.6 rows=6.22) (actual time=0.0125..0.0379 rows=22 loops=1)
+                -> Nested loop inner join  (cost=9.38 rows=6.22) (actual time=0.0114..0.0271 rows=22 loops=1)
+                    -> Nested loop inner join  (cost=7.2 rows=6.22) (actual time=0.00992..0.0204 rows=22 loops=1)
+                        -> Covering index lookup on s using idx_nodes_name (name='photosynthesis')  (cost=1.41 rows=3) (actual time=0.00429..0.00467 rows=3 loops=1)
+                        -> Index lookup on e using uq_edge_triple (subject_id=s.node_id)  (cost=1.79 rows=2.07) (actual time=0.00282..0.00468 rows=7.33 loops=3)
+                    -> Single-row index lookup on r using PRIMARY (relation_id=e.relation_id)  (cost=0.266 rows=1) (actual time=189e-6..210e-6 rows=1 loops=22)
+                -> Single-row index lookup on o using PRIMARY (node_id=e.object_id)  (cost=0.266 rows=1) (actual time=373e-6..394e-6 rows=1 loops=22)
+

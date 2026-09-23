@@ -1,0 +1,9 @@
+-- B1k2 (memgraph) 2-hop expansion (index-join chain vs. traversal)
+
+MATCH (n:Concept {name: 'enzyme'})-[r1]->()-[r2]->(x:Concept)
+WHERE r1.weight >= 0.5 AND r2.weight >= 0.5
+RETURN DISTINCT x.name AS name
+ORDER BY name LIMIT 100
+
+---- PLAN ----
+* None

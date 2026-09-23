@@ -1,0 +1,30 @@
+-- A6 (mysql) set difference (anti-join vs. negated pattern)
+
+SELECT DISTINCT s.name AS name
+FROM edges e
+JOIN nodes s ON s.node_id = e.subject_id
+JOIN nodes a ON a.node_id = e.object_id
+WHERE a.name = 'enzyme' AND e.relation_id = 2
+  AND NOT EXISTS (
+      SELECT 1 FROM edges e2
+      JOIN nodes b ON b.node_id = e2.object_id
+      WHERE e2.subject_id = e.subject_id AND e2.relation_id = 2
+        AND b.name = 'cell')
+ORDER BY name
+
+---- PLAN ----
+-> Sort: s.`name`  (actual time=0.22..0.22 rows=0 loops=1)
+    -> Table scan on <temporary>  (cost=29.5..29.5 rows=0.681) (actual time=0.215..0.215 rows=0 loops=1)
+        -> Temporary table with deduplication  (cost=27..27 rows=0.681) (actual time=0.214..0.214 rows=0 loops=1)
+            -> Nested loop antijoin  (cost=26.9 rows=0.681) (actual time=0.21..0.21 rows=0 loops=1)
+                -> Nested loop inner join  (cost=26.7 rows=0.375) (actual time=0.21..0.21 rows=0 loops=1)
+                    -> Nested loop inner join  (cost=26.6 rows=0.375) (actual time=0.21..0.21 rows=0 loops=1)
+                        -> Covering index lookup on a using idx_nodes_name (name='enzyme')  (cost=1.41 rows=3) (actual time=0.00554..0.006 rows=3 loops=1)
+                        -> Filter: (e.relation_id = 2)  (cost=7.48 rows=0.125) (actual time=0.0674..0.0674 rows=0 loops=3)
+                            -> Index lookup on e using ix_obj (object_id=a.node_id)  (cost=7.48 rows=9.01) (actual time=0.00697..0.0645 rows=120 loops=3)
+                    -> Single-row index lookup on s using PRIMARY (node_id=e.subject_id)  (cost=0.517 rows=1) (never executed)
+                -> Nested loop inner join  (cost=1.18 rows=1.82) (never executed)
+                    -> Covering index lookup on e2 using uq_edge_triple (subject_id=e.subject_id, relation_id=2)  (cost=0.827 rows=1.82) (never executed)
+                    -> Filter: (b.`name` = 'cell')  (cost=0.721 rows=1) (never executed)
+                        -> Single-row index lookup on b using PRIMARY (node_id=e2.object_id)  (cost=0.721 rows=1) (never executed)
+

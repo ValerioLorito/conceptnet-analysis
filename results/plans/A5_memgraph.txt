@@ -1,0 +1,9 @@
+-- A5 (memgraph) range selection on a sorted index
+
+MATCH (n:Concept)
+WHERE n.name >= 'cell' AND n.name <= 'gene'
+RETURN n.name AS name, CASE WHEN n:EntityNode THEN 'EntityNode' WHEN n:ActionEventNode THEN 'ActionEventNode' ELSE 'PropertyNode' END AS node_type
+ORDER BY name
+
+---- PLAN ----
+* None

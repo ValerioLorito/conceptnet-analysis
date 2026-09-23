@@ -1,0 +1,26 @@
+-- B1k2 (mysql) 2-hop expansion (index-join chain vs. traversal)
+
+SELECT DISTINCT x.name AS name
+FROM nodes n
+JOIN edges e1 ON e1.subject_id = n.node_id
+JOIN edges e2 ON e2.subject_id = e1.object_id
+JOIN nodes x ON x.node_id = e2.object_id
+WHERE n.name = 'enzyme' AND e1.weight >= 0.5 AND e2.weight >= 0.5
+ORDER BY name LIMIT 100
+
+
+---- PLAN ----
+-> Limit: 100 row(s)  (actual time=0.213..0.214 rows=22 loops=1)
+    -> Sort: x.`name`, limit input to 100 row(s) per chunk  (actual time=0.213..0.213 rows=22 loops=1)
+        -> Table scan on <temporary>  (cost=13.6..14.3 rows=1.43) (actual time=0.204..0.205 rows=22 loops=1)
+            -> Temporary table with deduplication  (cost=11.8..11.8 rows=1.43) (actual time=0.203..0.203 rows=22 loops=1)
+                -> Nested loop inner join  (cost=11.7 rows=1.43) (actual time=0.0389..0.195 rows=28 loops=1)
+                    -> Nested loop inner join  (cost=11.2 rows=1.43) (actual time=0.0375..0.113 rows=28 loops=1)
+                        -> Nested loop inner join  (cost=7.18 rows=2.07) (actual time=0.00783..0.0123 rows=7 loops=1)
+                            -> Covering index lookup on n using idx_nodes_name (name='enzyme')  (cost=1.41 rows=3) (actual time=0.00237..0.00292 rows=3 loops=1)
+                            -> Filter: (e1.weight >= 0.5)  (cost=1.74 rows=0.691) (actual time=0.00207..0.00275 rows=2.33 loops=3)
+                                -> Index lookup on e1 using uq_edge_triple (subject_id=n.node_id)  (cost=1.74 rows=2.07) (actual time=0.00196..0.00254 rows=2.33 loops=3)
+                        -> Filter: (e2.weight >= 0.5)  (cost=1.75 rows=0.691) (actual time=0.0091..0.014 rows=4 loops=7)
+                            -> Index lookup on e2 using uq_edge_triple (subject_id=e1.object_id)  (cost=1.75 rows=2.07) (actual time=0.00902..0.0138 rows=4 loops=7)
+                    -> Single-row index lookup on x using PRIMARY (node_id=e2.object_id)  (cost=0.32 rows=1) (actual time=0.00283..0.00285 rows=1 loops=28)
+

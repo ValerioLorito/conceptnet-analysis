@@ -1,0 +1,8 @@
+-- A1 (memgraph) 1-hop fan-out + tuple reassembly
+
+MATCH (n:Concept {name: 'photosynthesis'})-[r]->(m:Concept)
+RETURN n.name AS subject, type(r) AS relation, m.name AS object, r.weight AS weight
+ORDER BY weight DESC, relation, object LIMIT 25
+
+---- PLAN ----
+* None

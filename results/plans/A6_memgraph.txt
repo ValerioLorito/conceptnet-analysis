@@ -1,0 +1,9 @@
+-- A6 (memgraph) set difference (anti-join vs. negated pattern)
+
+MATCH (x:Concept)-[:AtLocation]->(:Concept {name: 'enzyme'})
+WHERE NOT (x)-[:AtLocation]->(:Concept {name: 'cell'})
+RETURN DISTINCT x.name AS name
+ORDER BY name
+
+---- PLAN ----
+* None
