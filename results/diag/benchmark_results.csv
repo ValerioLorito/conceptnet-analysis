@@ -1,0 +1,5 @@
+query,family,mechanism,expected,system,anchor,median_ms,min_ms,max_ms,mean_ms,stdev_ms,reps,rows,loc,chars,verify,plan_note,error
+B5,B,anchored triangle (cyclic pattern),"graph, clearly",mysql,,,,,,,,,,,,,1054 (42S22): Unknown column 'y.name' in 'field list'
+B5,B,anchored triangle (cyclic pattern),"graph, clearly",memgraph,enzyme,0.921,0.494,1.121,0.851,0.288,5,0,3,151,97d170e1550e,,
+C2,C,stored vs. derived grouping key (relation x class),either — trade-off is the finding,mysql,,575.442,561.56,587.052,574.685,12.763,3,110,5,270,26af6c391137,index,
+C2,C,stored vs. derived grouping key (relation x class),either — trade-off is the finding,memgraph,,,,,,,,,,,,,{neo4j_code: Memgraph.ClientError.MemgraphError.MemgraphError} {message: 'round' requires exactly 1 argument.} {gql_status: 50N42} {gql_status_description: error: general processing exception - unexpected error. 'round' requires exactly 1 argument.}

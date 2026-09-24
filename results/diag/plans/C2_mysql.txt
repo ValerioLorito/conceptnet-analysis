@@ -1,0 +1,16 @@
+-- C2 (mysql) stored vs. derived grouping key (relation x class)
+
+SELECT r.relation_name AS relation, e.edge_class AS edge_class,
+       COUNT(*) AS n_edges, ROUND(AVG(e.weight), 4) AS avg_w
+FROM edges e JOIN relations r ON r.relation_id = e.relation_id
+GROUP BY r.relation_name, e.edge_class
+ORDER BY n_edges DESC, relation, edge_class
+
+---- PLAN ----
+-> Sort: n_edges DESC, r.relation_name, e.edge_class  (actual time=661..661 rows=110 loops=1)
+    -> Table scan on <temporary>  (actual time=661..661 rows=110 loops=1)
+        -> Aggregate using temporary table  (actual time=661..661 rows=110 loops=1)
+            -> Nested loop inner join  (cost=113591 rows=505442) (actual time=0.417..215 rows=454139 loops=1)
+                -> Covering index scan on r using uq_relation_name  (cost=4.8 rows=38) (actual time=0.00637..0.0207 rows=38 loops=1)
+                -> Index lookup on e using idx_rel_class (relation_id=r.relation_id)  (cost=1694 rows=13301) (actual time=0.155..5.24 rows=11951 loops=38)
+

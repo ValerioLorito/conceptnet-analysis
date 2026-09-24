@@ -1,16 +1,16 @@
 -- C1 (mysql) hub ranking (full scan + one-pass grouping)
 
-SELECT n.name AS name, COUNT(*) AS out_degree
+SELECT n.uri AS uri, n.name AS name, COUNT(*) AS out_degree
 FROM edges e JOIN nodes n ON n.node_id = e.subject_id
-GROUP BY n.node_id, n.name
-ORDER BY out_degree DESC, name LIMIT 10
+GROUP BY n.uri, n.name
+ORDER BY out_degree DESC, uri LIMIT 10
 
 ---- PLAN ----
--> Limit: 10 row(s)  (actual time=782..782 rows=10 loops=1)
-    -> Sort: out_degree DESC, n.`name`, limit input to 10 row(s) per chunk  (actual time=782..782 rows=10 loops=1)
-        -> Table scan on <temporary>  (actual time=705..726 rows=215068 loops=1)
-            -> Aggregate using temporary table  (actual time=705..705 rows=215068 loops=1)
-                -> Nested loop inner join  (cost=163012 rows=600501) (actual time=0.0172..269 rows=454139 loops=1)
-                    -> Covering index scan on n using idx_nodes_name  (cost=30394 rows=289512) (actual time=0.0103..24.7 rows=291746 loops=1)
-                    -> Covering index lookup on e using uq_edge_triple (subject_id=n.node_id)  (cost=0.251 rows=2.07) (actual time=575e-6..727e-6 rows=1.56 loops=291746)
+-> Limit: 10 row(s)  (actual time=1034..1034 rows=10 loops=1)
+    -> Sort: out_degree DESC, n.uri, limit input to 10 row(s) per chunk  (actual time=1034..1034 rows=10 loops=1)
+        -> Table scan on <temporary>  (actual time=944..966 rows=215068 loops=1)
+            -> Aggregate using temporary table  (actual time=944..944 rows=215067 loops=1)
+                -> Nested loop inner join  (cost=179414 rows=774531) (actual time=0.0288..304 rows=454139 loops=1)
+                    -> Table scan on n  (cost=29305 rows=289440) (actual time=0.0187..37.8 rows=291746 loops=1)
+                    -> Covering index lookup on e using uq_edge_triple (subject_id=n.node_id)  (cost=0.251 rows=2.68) (actual time=621e-6..792e-6 rows=1.56 loops=291746)
 

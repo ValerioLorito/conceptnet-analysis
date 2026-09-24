@@ -1,0 +1,11 @@
+-- C2 (memgraph) stored vs. derived grouping key (relation x class)
+
+MATCH (s:Concept)-[r]->(o:Concept)
+RETURN type(r) AS relation,
+       (CASE WHEN s:EntityNode THEN 'E' WHEN s:ActionEventNode THEN 'A' ELSE 'P' END) + '2' +
+       (CASE WHEN o:EntityNode THEN 'E' WHEN o:ActionEventNode THEN 'A' ELSE 'P' END) AS edge_class,
+       count(r) AS n_edges, avg(r.weight) AS avg_w
+ORDER BY n_edges DESC, relation, edge_class
+
+---- PLAN ----
+* None

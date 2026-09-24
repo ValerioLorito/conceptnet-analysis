@@ -1,26 +1,27 @@
 -- B6 (mysql) traversal feeding aggregation (bags vs sets!)
 
-SELECT nbr.name AS name, COUNT(DISTINCT e2.edge_id) AS out_degree
+SELECT nbr.uri AS uri, nbr.name AS name, COUNT(DISTINCT e2.edge_id) AS out_degree
 FROM nodes n
 JOIN edges e1 ON e1.subject_id = n.node_id
 JOIN edges e2 ON e2.subject_id = e1.object_id
 JOIN nodes nbr ON nbr.node_id = e1.object_id
-WHERE n.name = 'enzyme'
-GROUP BY nbr.node_id, nbr.name
-ORDER BY out_degree DESC, name LIMIT 50
+WHERE n.name = 'horse' AND e1.edge_id <> e2.edge_id
+GROUP BY nbr.uri, nbr.name
+ORDER BY out_degree DESC, uri LIMIT 50
 
 ---- PLAN ----
--> Limit: 50 row(s)  (actual time=0.0514..0.0517 rows=5 loops=1)
-    -> Sort: out_degree DESC, nbr.`name`, limit input to 50 row(s) per chunk  (actual time=0.0512..0.0513 rows=5 loops=1)
-        -> Stream results  (actual time=0.0464..0.0491 rows=5 loops=1)
-            -> Group aggregate: count(distinct edges.edge_id)  (actual time=0.0458..0.048 rows=5 loops=1)
-                -> Sort: nbr.node_id, nbr.`name`  (actual time=0.045..0.0456 rows=28 loops=1)
-                    -> Stream results  (cost=12.6 rows=12.9) (actual time=0.0137..0.0365 rows=28 loops=1)
-                        -> Nested loop inner join  (cost=12.6 rows=12.9) (actual time=0.0133..0.0335 rows=28 loops=1)
-                            -> Nested loop inner join  (cost=9.74 rows=6.22) (actual time=0.0117..0.0239 rows=7 loops=1)
-                                -> Nested loop inner join  (cost=2.92 rows=6.22) (actual time=0.00433..0.00617 rows=7 loops=1)
-                                    -> Covering index lookup on n using idx_nodes_name (name='enzyme')  (cost=1.54 rows=3) (actual time=0.00175..0.00212 rows=3 loops=1)
-                                    -> Covering index lookup on e1 using uq_edge_triple (subject_id=n.node_id)  (cost=0.32 rows=2.07) (actual time=889e-6..0.00112 rows=2.33 loops=3)
-                                -> Single-row index lookup on nbr using PRIMARY (node_id=e1.object_id)  (cost=1.01 rows=1) (actual time=0.00236..0.00238 rows=1 loops=7)
-                            -> Covering index lookup on e2 using uq_edge_triple (subject_id=e1.object_id)  (cost=0.284 rows=2.07) (actual time=809e-6..0.00114 rows=4 loops=7)
+-> Limit: 50 row(s)  (actual time=15.8..15.8 rows=50 loops=1)
+    -> Sort: out_degree DESC, nbr.uri, limit input to 50 row(s) per chunk  (actual time=15.8..15.8 rows=50 loops=1)
+        -> Stream results  (actual time=15..15.8 rows=160 loops=1)
+            -> Group aggregate: count(distinct edges.edge_id)  (actual time=15..15.8 rows=160 loops=1)
+                -> Sort: nbr.uri, nbr.`name`  (actual time=15..15.2 rows=7195 loops=1)
+                    -> Stream results  (cost=20 rows=25.8) (actual time=0.0155..3.95 rows=7195 loops=1)
+                        -> Nested loop inner join  (cost=20 rows=25.8) (actual time=0.015..3.26 rows=7195 loops=1)
+                            -> Nested loop inner join  (cost=14.2 rows=10.7) (actual time=0.0116..1.39 rows=574 loops=1)
+                                -> Nested loop inner join  (cost=3.95 rows=10.7) (actual time=0.00912..0.108 rows=574 loops=1)
+                                    -> Covering index lookup on n using idx_nodes_name (name='horse')  (cost=1.76 rows=4) (actual time=0.00462..0.00617 rows=4 loops=1)
+                                    -> Covering index lookup on e1 using uq_edge_triple (subject_id=n.node_id)  (cost=0.347 rows=2.68) (actual time=0.00181..0.0204 rows=144 loops=4)
+                                -> Single-row index lookup on nbr using PRIMARY (node_id=e1.object_id)  (cost=0.864 rows=1) (actual time=0.00213..0.00215 rows=1 loops=574)
+                            -> Filter: (e1.edge_id <> e2.edge_id)  (cost=0.302 rows=2.41) (actual time=0.0011..0.00277 rows=12.5 loops=574)
+                                -> Covering index lookup on e2 using uq_edge_triple (subject_id=e1.object_id)  (cost=0.302 rows=2.68) (actual time=0.00103..0.00222 rows=12.5 loops=574)
 

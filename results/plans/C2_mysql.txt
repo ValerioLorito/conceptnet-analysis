@@ -1,16 +1,16 @@
 -- C2 (mysql) stored vs. derived grouping key (relation x class)
 
 SELECT r.relation_name AS relation, e.edge_class AS edge_class,
-       COUNT(*) AS n_edges, ROUND(AVG(e.weight), 4) AS avg_w
+       COUNT(*) AS n_edges, AVG(e.weight) AS avg_w
 FROM edges e JOIN relations r ON r.relation_id = e.relation_id
 GROUP BY r.relation_name, e.edge_class
 ORDER BY n_edges DESC, relation, edge_class
 
 ---- PLAN ----
--> Sort: n_edges DESC, r.relation_name, e.edge_class  (actual time=607..607 rows=110 loops=1)
-    -> Table scan on <temporary>  (actual time=607..607 rows=110 loops=1)
-        -> Aggregate using temporary table  (actual time=607..607 rows=110 loops=1)
-            -> Nested loop inner join  (cost=119453 rows=530881) (actual time=0.349..189 rows=454139 loops=1)
-                -> Covering index scan on r using uq_relation_name  (cost=5 rows=40) (actual time=0.00642..0.0158 rows=40 loops=1)
-                -> Index lookup on e using idx_rel_class (relation_id=r.relation_id)  (cost=1692 rows=13272) (actual time=0.125..4.35 rows=11353 loops=40)
+-> Sort: n_edges DESC, r.relation_name, e.edge_class  (actual time=654..654 rows=110 loops=1)
+    -> Table scan on <temporary>  (actual time=654..654 rows=110 loops=1)
+        -> Aggregate using temporary table  (actual time=654..654 rows=110 loops=1)
+            -> Nested loop inner join  (cost=113591 rows=505442) (actual time=1.14..223 rows=454139 loops=1)
+                -> Covering index scan on r using uq_relation_name  (cost=4.8 rows=38) (actual time=0.013..0.0255 rows=38 loops=1)
+                -> Index lookup on e using idx_rel_class (relation_id=r.relation_id)  (cost=1694 rows=13301) (actual time=0.211..5.47 rows=11951 loops=38)
 

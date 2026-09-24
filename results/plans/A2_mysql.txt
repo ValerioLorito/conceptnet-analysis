@@ -10,14 +10,14 @@ WHERE s.name = 'photosynthesis'
 ORDER BY weight DESC, relation, object LIMIT 25
 
 ---- PLAN ----
--> Limit: 25 row(s)  (actual time=0.0885..0.0904 rows=22 loops=1)
-    -> Sort: e.weight DESC, r.relation_name, o.`name`, limit input to 25 row(s) per chunk  (actual time=0.0882..0.0892 rows=22 loops=1)
-        -> Stream results  (cost=11.5 rows=6.22) (actual time=0.0075..0.0688 rows=22 loops=1)
-            -> Nested loop inner join  (cost=11.5 rows=6.22) (actual time=0.00713..0.0655 rows=22 loops=1)
-                -> Nested loop inner join  (cost=4.97 rows=6.22) (actual time=0.00592..0.022 rows=22 loops=1)
-                    -> Nested loop inner join  (cost=2.79 rows=6.22) (actual time=0.00513..0.0166 rows=22 loops=1)
-                        -> Covering index lookup on s using idx_nodes_name (name='photosynthesis')  (cost=0.613 rows=3) (actual time=0.00162..0.002 rows=3 loops=1)
-                        -> Index lookup on e using uq_edge_triple (subject_id=s.node_id)  (cost=0.588 rows=2.07) (actual time=0.00249..0.00447 rows=7.33 loops=3)
-                    -> Single-row index lookup on r using PRIMARY (relation_id=e.relation_id)  (cost=0.266 rows=1) (actual time=136e-6..146e-6 rows=1 loops=22)
-                -> Single-row index lookup on o using PRIMARY (node_id=e.object_id)  (cost=0.969 rows=1) (actual time=0.00188..0.0019 rows=1 loops=22)
+-> Limit: 25 row(s)  (actual time=0.103..0.105 rows=22 loops=1)
+    -> Sort: e.weight DESC, r.relation_name, o.`name`, limit input to 25 row(s) per chunk  (actual time=0.103..0.104 rows=22 loops=1)
+        -> Stream results  (cost=10.4 rows=7.67) (actual time=0.00862..0.0828 rows=22 loops=1)
+            -> Nested loop inner join  (cost=10.4 rows=7.67) (actual time=0.00825..0.0792 rows=22 loops=1)
+                -> Nested loop inner join  (cost=6.88 rows=7.67) (actual time=0.00708..0.0248 rows=22 loops=1)
+                    -> Nested loop inner join  (cost=4.2 rows=7.67) (actual time=0.00621..0.0192 rows=22 loops=1)
+                        -> Covering index lookup on s using idx_nodes_name (name='photosynthesis')  (cost=1.51 rows=3) (actual time=0.00192..0.00221 rows=3 loops=1)
+                        -> Index lookup on e using ix_fk_s (subject_id=s.node_id)  (cost=0.725 rows=2.56) (actual time=0.0026..0.00526 rows=7.33 loops=3)
+                    -> Single-row index lookup on r using PRIMARY (relation_id=e.relation_id)  (cost=0.263 rows=1) (actual time=150e-6..172e-6 rows=1 loops=22)
+                -> Single-row index lookup on o using PRIMARY (node_id=e.object_id)  (cost=0.367 rows=1) (actual time=0.00237..0.00239 rows=1 loops=22)
 

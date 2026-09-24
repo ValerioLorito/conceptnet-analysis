@@ -1,0 +1,206 @@
+{
+  "environment": {
+    "date": "2026-09-23T19:52:09",
+    "python": "3.10.0",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "cpus": 10,
+    "reps": 3,
+    "warmup": 1,
+    "sp_depth": 3,
+    "mysql_version": "8.0.46",
+    "innodb_buffer_pool_mb": 128,
+    "memgraph_version": "(unavailable: {neo4j_code: Memgraph.ClientError.MemgraphError.MemgraphError} {message: There is no procedure named 'mg.info'.} {gql_status: 50N42} {gql_status_description: error: general processing exception - unexpected error. There is no procedure named 'mg.info'.})",
+    "memgraph_indexes": [
+      {
+        "index type": "label+property",
+        "label": "Concept",
+        "property": [
+          "label_source"
+        ],
+        "count": 291746
+      },
+      {
+        "index type": "label+property",
+        "label": "Concept",
+        "property": [
+          "name"
+        ],
+        "count": 291746
+      },
+      {
+        "index type": "label+property",
+        "label": "Concept",
+        "property": [
+          "pos"
+        ],
+        "count": 291746
+      }
+    ]
+  },
+  "anchors": {
+    "present": [
+      "/c/en/photosynthesis/n",
+      "abundant",
+      "beaker",
+      "cell",
+      "chlorophyll",
+      "enzyme",
+      "gene",
+      "laboratory",
+      "microscope",
+      "mitochondrion",
+      "photosynthesis",
+      "sunlight"
+    ],
+    "degrees": {
+      "abundant": 1,
+      "beaker": 2,
+      "cell": 357,
+      "chlorophyll": 19,
+      "enzyme": 7,
+      "gene": 40,
+      "laboratory": 6,
+      "microscope": 9,
+      "mitochondrion": 27,
+      "photosynthesis": 22,
+      "sunlight": 1
+    },
+    "missing": []
+  },
+  "storage": {
+    "mysql_mb": {
+      "edges": {
+        "data": 34.6,
+        "index": 85.3
+      },
+      "nodes": {
+        "data": 22.5,
+        "index": 34.6
+      }
+    },
+    "memgraph_storage_info": [
+      {
+        "storage info": "vm_max_map_count",
+        "value": 262144
+      },
+      {
+        "storage info": "memory_res",
+        "value": "1.09GiB"
+      },
+      {
+        "storage info": "peak_memory_res",
+        "value": "2.35GiB"
+      },
+      {
+        "storage info": "disk_usage",
+        "value": "456.32MiB"
+      },
+      {
+        "storage info": "memory_tracked",
+        "value": "588.14MiB"
+      },
+      {
+        "storage info": "memory_limit",
+        "value": "15.60GiB"
+      },
+      {
+        "storage info": "license_memory_limit",
+        "value": "unlimited"
+      },
+      {
+        "storage info": "query+graph_memory_tracked",
+        "value": "588.14MiB"
+      },
+      {
+        "storage info": "vector_index_memory_tracked",
+        "value": "0B"
+      },
+      {
+        "storage info": "global_isolation_level",
+        "value": "SNAPSHOT_ISOLATION"
+      },
+      {
+        "storage info": "session_isolation_level",
+        "value": ""
+      },
+      {
+        "storage info": "next_session_isolation_level",
+        "value": ""
+      },
+      {
+        "storage info": "global_storage_mode",
+        "value": "IN_MEMORY_TRANSACTIONAL"
+      }
+    ]
+  },
+  "results": [
+    {
+      "query": "B5",
+      "system": "mysql",
+      "error": "1054 (42S22): Unknown column 'y.name' in 'field list'",
+      "family": "B",
+      "mechanism": "anchored triangle (cyclic pattern)",
+      "expected": "graph, clearly"
+    },
+    {
+      "query": "B5",
+      "family": "B",
+      "mechanism": "anchored triangle (cyclic pattern)",
+      "expected": "graph, clearly",
+      "system": "memgraph",
+      "anchor": "enzyme",
+      "median_ms": 0.921,
+      "min_ms": 0.494,
+      "max_ms": 1.121,
+      "mean_ms": 0.851,
+      "stdev_ms": 0.288,
+      "reps": 5,
+      "rows": 0,
+      "loc": 3,
+      "chars": 151,
+      "verify": "97d170e1550e",
+      "raw_ms": [
+        1.11,
+        1.121,
+        0.921,
+        0.607,
+        0.494
+      ],
+      "plan_file": "plans/B5_memgraph.txt",
+      "plan_note": ""
+    },
+    {
+      "query": "C2",
+      "family": "C",
+      "mechanism": "stored vs. derived grouping key (relation x class)",
+      "expected": "either — trade-off is the finding",
+      "system": "mysql",
+      "anchor": "",
+      "median_ms": 575.442,
+      "min_ms": 561.56,
+      "max_ms": 587.052,
+      "mean_ms": 574.685,
+      "stdev_ms": 12.763,
+      "reps": 3,
+      "rows": 110,
+      "loc": 5,
+      "chars": 270,
+      "verify": "26af6c391137",
+      "raw_ms": [
+        587.052,
+        561.56,
+        575.442
+      ],
+      "plan_file": "plans/C2_mysql.txt",
+      "plan_note": "index"
+    },
+    {
+      "query": "C2",
+      "system": "memgraph",
+      "error": "{neo4j_code: Memgraph.ClientError.MemgraphError.MemgraphError} {message: 'round' requires exactly 1 argument.} {gql_status: 50N42} {gql_status_description: error: general processing exception - unexpected error. 'round' requires exactly 1 argument.}",
+      "family": "C",
+      "mechanism": "stored vs. derived grouping key (relation x class)",
+      "expected": "either — trade-off is the finding"
+    }
+  ]
+}

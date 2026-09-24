@@ -4,27 +4,27 @@ SELECT DISTINCT s.name AS name
 FROM edges e
 JOIN nodes s ON s.node_id = e.subject_id
 JOIN nodes a ON a.node_id = e.object_id
-WHERE a.name = 'enzyme' AND e.relation_id = 2
+WHERE a.name = 'human' AND e.relation_id = 2
   AND NOT EXISTS (
       SELECT 1 FROM edges e2
       JOIN nodes b ON b.node_id = e2.object_id
       WHERE e2.subject_id = e.subject_id AND e2.relation_id = 2
-        AND b.name = 'cell')
+        AND b.name = 'body')
 ORDER BY name
 
 ---- PLAN ----
--> Sort: s.`name`  (actual time=0.233..0.233 rows=0 loops=1)
-    -> Table scan on <temporary>  (cost=12.9..12.9 rows=0.681) (actual time=0.231..0.231 rows=0 loops=1)
-        -> Temporary table with deduplication  (cost=10.4..10.4 rows=0.681) (actual time=0.231..0.231 rows=0 loops=1)
-            -> Nested loop antijoin  (cost=10.4 rows=0.681) (actual time=0.228..0.228 rows=0 loops=1)
-                -> Nested loop inner join  (cost=10.2 rows=0.375) (actual time=0.228..0.228 rows=0 loops=1)
-                    -> Nested loop inner join  (cost=10.1 rows=0.375) (actual time=0.228..0.228 rows=0 loops=1)
-                        -> Covering index lookup on a using idx_nodes_name (name='enzyme')  (cost=0.613 rows=3) (actual time=0.00321..0.00367 rows=3 loops=1)
-                        -> Filter: (e.relation_id = 2)  (cost=2.26 rows=0.125) (actual time=0.0744..0.0744 rows=0 loops=3)
-                            -> Index lookup on e using ix_obj (object_id=a.node_id)  (cost=2.26 rows=9.01) (actual time=0.00676..0.0712 rows=120 loops=3)
-                    -> Single-row index lookup on s using PRIMARY (node_id=e.subject_id)  (cost=0.517 rows=1) (never executed)
-                -> Nested loop inner join  (cost=1.09 rows=1.82) (never executed)
-                    -> Covering index lookup on e2 using uq_edge_triple (subject_id=e.subject_id, relation_id=2)  (cost=0.736 rows=1.82) (never executed)
-                    -> Filter: (b.`name` = 'cell')  (cost=0.721 rows=1) (never executed)
-                        -> Single-row index lookup on b using PRIMARY (node_id=e2.object_id)  (cost=0.721 rows=1) (never executed)
+-> Sort: s.`name`  (actual time=1.22..1.22 rows=6 loops=1)
+    -> Table scan on <temporary>  (cost=12.6..12.6 rows=0.517) (actual time=1.21..1.21 rows=6 loops=1)
+        -> Temporary table with deduplication  (cost=10.1..10.1 rows=0.517) (actual time=1.21..1.21 rows=6 loops=1)
+            -> Nested loop antijoin  (cost=10.1 rows=0.517) (actual time=0.0195..1.21 rows=6 loops=1)
+                -> Nested loop inner join  (cost=9.94 rows=0.329) (actual time=0.014..0.968 rows=9 loops=1)
+                    -> Nested loop inner join  (cost=9.82 rows=0.329) (actual time=0.012..0.891 rows=9 loops=1)
+                        -> Covering index lookup on a using idx_nodes_name (name='human')  (cost=1.49 rows=3) (actual time=0.00263..0.00333 rows=3 loops=1)
+                        -> Filter: (e.relation_id = 2)  (cost=1.99 rows=0.11) (actual time=0.0867..0.295 rows=3 loops=3)
+                            -> Index lookup on e using ix_obj (object_id=a.node_id)  (cost=1.99 rows=7.93) (actual time=0.00436..0.28 rows=510 loops=3)
+                    -> Single-row index lookup on s using PRIMARY (node_id=e.subject_id)  (cost=0.554 rows=1) (actual time=0.00842..0.00844 rows=1 loops=9)
+                -> Nested loop inner join  (cost=1.01 rows=1.57) (actual time=0.0266..0.0266 rows=0.333 loops=9)
+                    -> Covering index lookup on e2 using uq_edge_triple (subject_id=e.subject_id, relation_id=2)  (cost=0.727 rows=1.57) (actual time=0.00122..0.00193 rows=4.33 loops=9)
+                    -> Filter: (b.`name` = 'body')  (cost=0.696 rows=1) (actual time=0.0056..0.0056 rows=0.0769 loops=39)
+                        -> Single-row index lookup on b using PRIMARY (node_id=e2.object_id)  (cost=0.696 rows=1) (actual time=0.00545..0.00547 rows=1 loops=39)
 

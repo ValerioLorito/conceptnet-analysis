@@ -5,7 +5,7 @@ WHERE name BETWEEN 'cell' AND 'gene'
 ORDER BY name
 
 ---- PLAN ----
--> Sort: nodes.`name`  (cost=29312 rows=289512) (actual time=96.6..98.4 rows=60507 loops=1)
-    -> Filter: (nodes.`name` between 'cell' and 'gene')  (cost=29312 rows=289512) (actual time=5.51..38.3 rows=60507 loops=1)
-        -> Table scan on nodes  (cost=29312 rows=289512) (actual time=0.0164..29.4 rows=291746 loops=1)
+-> Sort: nodes.`name`  (cost=29305 rows=289440) (actual time=104..106 rows=60507 loops=1)
+    -> Filter: (nodes.`name` between 'cell' and 'gene')  (cost=29305 rows=289440) (actual time=7.31..38.8 rows=60507 loops=1)
+        -> Table scan on nodes  (cost=29305 rows=289440) (actual time=0.0176..29.6 rows=291746 loops=1)
 

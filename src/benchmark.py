@@ -26,8 +26,38 @@ FAMILY C (Global Retrieval)
     C2  Relation-ClassType Matrix          (stored vs. derived grouping key)
 FAMILY D (Schema and Integrity Findings)
     D1  Violation Check                    (view vs. meta-graph anti-join)
-    D2  Invalid Insert                     — MANUAL write demo (read-only harness)
-    D3  Concept Delete                     — MANUAL write demo (read-only harness)
+    D2  Invalid Insert                     (write demo — see WRITE DEMOS)
+    D3  Concept Delete                     (write demo — see WRITE DEMOS)
+
+WRITE DEMOS (D2/D3) — self-cleaning, single-shot, run LAST:
+    The read battery is repeatable; D2/D3 mutate the stores DURING the
+    demo and are engineered to leave them untouched afterwards:
+      * no warm-up/reps — a write is not idempotent under repetition (the
+        second D2 insert collides with the unique triple; a repeated D3
+        delete is a no-op). Per-step timings are recorded instead.
+      * D2 inserts an invalid edge and records the engine's response:
+        MySQL — (a) truthful class + unpermitted combination: ACCEPTED,
+        visible as permitted=0 in v_edges; (b) lying edge_class: ERROR 3819
+        (CHECK chk_edges_class); (c) lying endpoint type: ERROR 1452
+        (composite FK). Memgraph — accepted silently, then DETECTED by the
+        D1 query against the :Schema meta-graph. Cleanup restores
+        violations=0 on both.
+      * D3 creates a demo concept (_bench_d3) with three RelatedTo edges,
+        then times its deletion: MySQL — wrong order first (DELETE parent
+        with children present: ERROR 1451), then children-before-parent
+        inside a transaction; Memgraph — one atomic DETACH DELETE.
+        (Deviation from Queries.pdf, which deletes 'chloroplast': the
+        harness deletes a demo concept it just created — same mechanics,
+        non-destructive, battery stays re-runnable. Mirror in the PDF.)
+      * cross-system verification compares STATE SIGNATURES, not row
+        hashes (the engines are supposed to disagree on D2): D2 must show
+        violations=1 during and 0 after on BOTH systems; D3 must delete
+        the same number of edges on both. A final state check asserts
+        nodes/edges counts equal the pre-demo snapshot on both stores.
+      * residue: MySQL's AUTO_INCREMENT counter keeps a gap after the
+        demo deletes (harmless; build_mysql.py's TRUNCATE resets it).
+        Leftovers of a previously crashed demo are cleaned idempotently.
+    Disable with --no-write-demos for a pure read-only run.
 
 DELIBERATE DEVIATIONS from the PDF texts (each forced by correctness):
     * ORDER BY added before LIMIT in B1/B5/B6 — LIMIT without ORDER BY is
@@ -42,21 +72,33 @@ DELIBERATE DEVIATIONS from the PDF texts (each forced by correctness):
     * B3's Cypher uses Memgraph's BFS expansion (*BFS..d); if this build
       rejects the syntax, replace with *..d (same semantics, more paths
       enumerated).
+    * C2 does not round avg_w on either side: this Memgraph build's round()
+      accepts exactly 1 argument, and the harness canonicalizes floats to
+      4 decimals during verification anyway.
+    * D3 deletes a harness-created demo concept instead of 'chloroplast'
+      (see WRITE DEMOS).
 
-SHORTEST-PATH DEPTH (SP_MAX_DEPTH, the '3-hop constant'): undirected,
-all-relation variable-length traversal enumerates walks exponentially in
-depth — ConceptNet's hubs multiply the frontier, the outer LIMIT cannot
-prune MySQL's recursive CTE (it is materialized fully first), and
-Memgraph's plain *..d enumerates all paths too. Depth 5 had to be killed
-after ~30 minutes and the memory blow-up froze the Docker VM. Hence ONE
-constant for both B3 and B4, default 3, overridable with --sp-depth.
-WHATEVER DEPTH YOU RUN: (a) verify the anchor pair is connected at that
-depth (inspect_query.py B3 must return >= 1 row, else the query
-benchmarks nothing), and (b) update Queries.pdf to match — the proposal
-must describe the executed experiment.
+FIX LOG (the queries the harness itself caught):
+    * B5's SQL originally named y/z in the SELECT without joining them
+      (error 1054 'Unknown column y.name') — fixed by chaining
+      n ->e1-> y ->e2-> z ->e3-> n. Note the asymmetry: Cypher patterns
+      bind their node variables by construction, so the Cypher side could
+      not have this bug; SQL requires every projected variable to be
+      spelled out as a join, and the engine catches the omission.
+    * The MySQL read path runs with autocommit and reconnects once on
+      connection errors — a read-only harness must not hold implicit
+      read transactions open across a long battery run.
 
-Protocol: per query, WARMUP discarded runs + REPS measured runs
-(per-query overrides); median / min / max / mean / stdev reported.
+SHORTEST-PATH DEPTH (SP_MAX_DEPTH): undirected, all-relation variable-length
+traversal enumerates walks exponentially in depth — depth 5 had to be
+killed after ~30 minutes and the memory blow-up froze the Docker VM. ONE
+constant for B3 and B4, default 3, overridable with --sp-depth. Whatever
+depth you run: (a) verify the anchor pair is connected at that depth
+(inspect_query.py B3 must return >= 1 row), and (b) update Queries.pdf to
+match — the proposal must describe the executed experiment.
+
+Protocol (read queries): per query, WARMUP discarded runs + REPS measured
+runs (per-query overrides); median / min / max / mean / stdev reported.
 Results are verified across systems by canonicalized row-set hash.
 Plans (EXPLAIN ANALYZE / PROFILE) are captured for PLAN_QUERIES.
 
@@ -70,6 +112,7 @@ Usage
     python benchmark.py                     # full battery, both systems
     python benchmark.py --quick             # smoke test (3 reps, 1 warm-up)
     python benchmark.py --queries A2,B1k4   # subset
+    python benchmark.py --no-write-demos    # skip D2/D3 (read-only)
     python benchmark.py --sp-depth 4        # B3/B4 depth override (careful!)
     python benchmark.py --mysql-only | --memgraph-only
     python benchmark.py --stratify-b1       # B1 over low/med/high-degree anchors
@@ -123,6 +166,8 @@ MYSQL_CONFIG = {
     "password": os.environ.get("MYSQL_PASSWORD", "rootpassword"),
     "database": "conceptnet",
     "charset":  "utf8mb4",
+    "autocommit": True,     # read-only harness: no implicit read
+                            # transactions held open across the battery
 }
 
 MEMGRAPH_URI  = os.environ.get("MEMGRAPH_URI", "bolt://localhost:7687")
@@ -133,39 +178,44 @@ WARMUP = 2       # discarded repetitions
 
 OUT_DIR = "results"
 
+RUN_WRITE_DEMOS = True   # D2/D3 included; --no-write-demos overrides
+
+# Demo identities used by the write demos (D2/D3). URI-namespace-prefixed
+# with '_' so they can never collide with real ConceptNet URIs.
+DEMO_URI_A  = "/c/en/_demo_a"
+DEMO_URI_B  = "/c/en/_demo_b"
+DEMO_URI_D3 = "/c/en/_bench_d3"
+
 # Anchors — curated; existence is verified at startup (URIs against
 # nodes.uri, names against nodes.name), and queries whose anchors are
 # missing are skipped with a recorded reason.
 # !! A query where BOTH systems return 0 rows verifies OK but benchmarks
-# !! NOTHING — the harness warns. From the first quick run, A3/A4b/A5/A7
-# !! anchors were dead in this slice: run the anchor-finding queries in
-# !! the project notes and substitute before the final run.
+# !! NOTHING — the harness warns. Substitute anchors with live data.
 ANCHORS = {
-    # A1 — URI anchor (identity-level lookup, per the final query list)
     "a1_uri": "/c/en/photosynthesis/n",
-    # name anchors
     "a2":  "photosynthesis",
-    "a3":  "cell",
-    "a4a": "laboratory",
-    "a4b": "abundant",
-    "a5a": "microscope", "a5b": "beaker",
+    "a3":  "animals",
+    "a4a": "desert",
+    "a4b": "person",
+    "a5a": "horse", "a5b": "beaver",
     "a6lo": "cell", "a6hi": "gene",
-    "a7a": "enzyme", "a7b": "cell",
+    "a7a": "human", "a7b": "body",
     "b1":  "enzyme",
     "b2":  "mitochondrion",
-    "b3a": "chlorophyll", "b3b": "sunlight",
-    "b4a": "chlorophyll", "b4b": "sunlight",
-    "b5":  "enzyme",
-    "b6":  "enzyme",
-    # relation names (for the Cypher edge types)
+    "b3a": "photosynthesis", "b3b": "human",
+    "b4a": "photosynthesis", "b4b": "plant",
+    "b5":  "blood",
+    "b6":  "horse",
+    "c1v_rel": "UsedFor",
     "a3_rel": "CapableOf",
     "a4a_rel": "AtLocation", "a4b_rel": "Antonym",
-    "a5_rel": "AtLocation",
+    "a5_rel": "IsA",
     "a7_rel": "AtLocation",
     "b2_rel": "IsA",
 }
 
-# Relation ids (must match conceptnet_schema.sql)
+# Relation ids (must match conceptnet_schema.sql — 38 relations after the
+# PropertyOf/LocationOf removal)
 REL_IDS = {"Antonym": 1, "AtLocation": 2, "CapableOf": 3, "DefinedAs": 7,
            "HasProperty": 20, "IsA": 23, "PartOf": 31, "RelatedTo": 33,
            "UsedFor": 37}
@@ -175,7 +225,6 @@ MIN_W = 0.5        # weight filter for B1
 B2_MAX_DEPTH = 5   # transitive closure: single relation -> bounded fan-out
 SP_MAX_DEPTH = 3   # shortest path family (B3/B4): all relations ->
                    # EXPONENTIAL fan-out; see the docstring incident note.
-                   # Override with --sp-depth; update Queries.pdf to match.
 
 # Queries whose physical plans are captured into plans/
 PLAN_QUERIES = {"A2", "A4b", "A6", "A7", "B1k2", "B1k4", "B5", "B6",
@@ -189,6 +238,18 @@ B1_STRAT_POOL = ["enzyme", "cell", "gene", "protein", "animal",
 # detector. Legitimate Cypher property maps ('{name: ...}') contain a
 # colon and therefore never match this pattern.
 LEFTOVER_RE = re.compile(r"\{[a-z_][a-z0-9_]*\}")
+
+# The D1 violation query, shared by the D1 read query and the D2 write
+# demo (single source of truth — the demo checks what D1 checks).
+D1_CYPHER = """
+MATCH (s:Concept)-[r]->(o:Concept)
+MATCH (rt:Schema:RelationType {name: type(r)})
+OPTIONAL MATCH (rt)-[:PERMITS]->(c:Schema:EdgeClass)
+    WHERE c.name = (CASE WHEN s:EntityNode THEN 'E' WHEN s:ActionEventNode THEN 'A' ELSE 'P' END) + '2' +
+               (CASE WHEN o:EntityNode THEN 'E' WHEN o:ActionEventNode THEN 'A' ELSE 'P' END)
+WITH r, c WHERE c IS NULL
+RETURN count(r) AS violations
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -204,12 +265,12 @@ class QuerySpec:
     sql: str = None
     cypher: str = None
     params: dict = field(default_factory=dict)
-    reps: int = 0      # 0 = use the global protocol value (resolved in
-    warmup: int = 0    # build_specs AFTER --quick/--reps are applied; a
-                       # literal default here would freeze at import time)
+    reps: int = 0      # 0 = global protocol value (resolved in build_specs
+    warmup: int = 0    # AFTER --quick/--reps are applied)
     verify: bool = True
     note: str = ""
     plan: bool = False
+    kind: str = "read"   # "read" | "d2" | "d3" (writes: dedicated handlers)
 
     def resolve(self, text):
         out = text
@@ -236,9 +297,8 @@ def b1_pair(k):
     the double-brace tokens ({{anchor}}, {{minw}}) that
     QuerySpec.resolve() substitutes. Inside an f-string, {{minw}}
     renders to {minw}, resolve() silently replaces nothing, and the
-    engine receives literal brace junk.
-    ORDER BY name is added before LIMIT so the 100-row window is
-    deterministic and therefore comparable across systems.
+    engine receives literal brace junk. ORDER BY name before LIMIT keeps
+    the 100-row window deterministic and comparable across systems.
     """
     joins = ["JOIN edges e1 ON e1.subject_id = n.node_id"]
     wfilt, cw = [], []
@@ -274,102 +334,120 @@ def build_specs(stratify_b1=False, b1_anchors=None):
         # ---------------- FAMILY A — local retrieval ----------------------
         QuerySpec(
             "A1", "A", "equality selection on the unique key (baseline)", "tie",
-            sql="""SELECT uri, name, node_type, label_source
-FROM nodes WHERE uri = '{{anchor_uri}}'""",
-            cypher="""MATCH (n:Concept {uri: '{{anchor_uri}}'})
-RETURN n.uri AS uri, n.name AS name,
-       {{node_type_case}} AS node_type, n.label_source AS label_source""",
+            sql="""
+            SELECT uri, name, node_type, label_source
+            FROM nodes WHERE uri = '{{anchor_uri}}'""",
+            cypher="""
+            MATCH (n:Concept {uri: '{{anchor_uri}}'})
+            RETURN n.uri AS uri, n.name AS name,
+                {{node_type_case}} AS node_type, n.label_source AS label_source""",
             params={"anchor_uri": p["a1_uri"],
                     "node_type_case": NODE_TYPE_CASE},
             note="PDF also selects id(n)/node_id; dropped because engine "
-                 "ids are non-isomorphic by design (MySQL = load order, "
-                 "Memgraph = storage-assigned) — the URI is the identity"),
+                 "ids are non-isomorphic by design — the URI is the identity"),
 
         QuerySpec(
             "A2", "A", "1-hop fan-out + tuple reassembly (join-backs)", "slight graph",
-            sql="""SELECT s.name AS subject, r.relation_name AS relation,
-       o.name AS object, e.weight AS weight
-FROM nodes s
-JOIN edges e     ON e.subject_id = s.node_id
-JOIN nodes o     ON o.node_id = e.object_id
-JOIN relations r ON r.relation_id = e.relation_id
-WHERE s.name = '{{anchor}}'
-ORDER BY weight DESC, relation, object LIMIT 25""",
-            cypher="""MATCH (n:Concept {name: '{{anchor}}'})-[r]->(m:Concept)
-RETURN n.name AS subject, type(r) AS relation, m.name AS object, r.weight AS weight
-ORDER BY weight DESC, relation, object LIMIT 25""",
+            sql="""
+            SELECT s.name AS subject, r.relation_name AS relation,
+                o.name AS object, e.weight AS weight
+            FROM nodes s
+            JOIN edges e     ON e.subject_id = s.node_id
+            JOIN nodes o     ON o.node_id = e.object_id
+            JOIN relations r ON r.relation_id = e.relation_id
+            WHERE s.name = '{{anchor}}'
+            ORDER BY weight DESC, relation, object LIMIT 25""",
+            cypher="""
+            MATCH (n:Concept {name: '{{anchor}}'})-[r]->(m:Concept)
+            RETURN n.name AS subject, type(r) AS relation, m.name AS object, r.weight AS weight
+            ORDER BY weight DESC, relation, object LIMIT 25""",
             params={"anchor": p["a2"]}, plan=True),
 
         QuerySpec(
             "A3", "A", "discriminated access (relation id vs. edge type)", "tie",
-            sql="""SELECT o.name AS action
-FROM nodes s
-JOIN edges e ON e.subject_id = s.node_id
-JOIN nodes o ON o.node_id = e.object_id
-WHERE s.name = '{{anchor}}' AND e.relation_id = {{rel}}
-ORDER BY action""",
-            cypher="""MATCH (:Concept {name: '{{anchor}}'})-[:{{rel_name}}]->(a:ActionEventNode)
-RETURN a.name AS action
-ORDER BY action""",
-            params={"anchor": p["a3"], "rel": REL_IDS["CapableOf"],
+            sql="""
+            SELECT o.name AS action
+            FROM nodes s
+            JOIN edges e ON e.subject_id = s.node_id
+            JOIN nodes o ON o.node_id = e.object_id
+            WHERE s.name = '{{anchor}}' AND e.relation_id = {{rel}}
+            ORDER BY action""",
+            cypher="""
+            MATCH (:Concept {name: '{{anchor}}'})-[:{{rel_name}}]->(a:ActionEventNode)
+            RETURN a.name AS action
+            ORDER BY action""",
+            params={"anchor": p["a3"], "rel": REL_IDS[p["a3_rel"]],
                     "rel_name": p["a3_rel"]}),
 
         QuerySpec(
             "A4a", "A", "directed (reverse) 1-hop: second index vs. free adjacency", "tie",
-            sql="""SELECT s.name AS thing
-FROM nodes o
-JOIN edges e ON e.object_id = o.node_id
-JOIN nodes s ON s.node_id = e.subject_id
-WHERE o.name = '{{anchor}}' AND e.relation_id = {{rel}}
-ORDER BY thing""",
-            cypher="""MATCH (thing:Concept)-[:{{rel_name}}]->(:Concept {name: '{{anchor}}'})
-RETURN thing.name AS thing
-ORDER BY thing""",
-            params={"anchor": p["a4a"], "rel": REL_IDS["AtLocation"],
+            sql="""
+            SELECT s.name AS thing
+            FROM nodes o
+            JOIN edges e ON e.object_id = o.node_id
+            JOIN nodes s ON s.node_id = e.subject_id
+            WHERE o.name = '{{anchor}}' AND e.relation_id = {{rel}}
+            ORDER BY thing""",
+            cypher="""
+            MATCH (thing:Concept)-[:{{rel_name}}]->(:Concept {name: '{{anchor}}'})
+            RETURN thing.name AS thing
+            ORDER BY thing""",
+            params={"anchor": p["a4a"], "rel": REL_IDS[p["a4a_rel"]],
                     "rel_name": p["a4a_rel"]}),
 
         QuerySpec(
             "A4b", "A", "undirected 1-hop: OR predicate vs. one pattern", "graph",
-            sql="""SELECT CASE WHEN e.subject_id = n.node_id THEN o.name ELSE s.name END AS neighbor
-FROM nodes n
-JOIN edges e ON (e.subject_id = n.node_id OR e.object_id = n.node_id)
-JOIN nodes s ON s.node_id = e.subject_id
-JOIN nodes o ON o.node_id = e.object_id
-WHERE n.name = '{{anchor}}' AND e.relation_id = {{rel}}
-ORDER BY neighbor""",
-            cypher="""MATCH (:Concept {name: '{{anchor}}'})-[:{{rel_name}}]-(y:Concept)
-RETURN y.name AS neighbor
-ORDER BY neighbor""",
-            params={"anchor": p["a4b"], "rel": REL_IDS["Antonym"],
+            sql="""
+            SELECT CASE WHEN e.subject_id = n.node_id THEN o.name ELSE s.name END AS neighbor
+            FROM nodes n
+            JOIN edges e ON (e.subject_id = n.node_id OR e.object_id = n.node_id)
+            JOIN nodes s ON s.node_id = e.subject_id
+            JOIN nodes o ON o.node_id = e.object_id
+            WHERE n.name = '{{anchor}}' AND e.relation_id = {{rel}}
+            ORDER BY neighbor""",
+            cypher="""
+            MATCH (:Concept {name: '{{anchor}}'})-[:{{rel_name}}]-(y:Concept)
+            RETURN y.name AS neighbor
+            ORDER BY neighbor""",
+            params={"anchor": p["a4b"], "rel": REL_IDS[p["a4b_rel"]],
                     "rel_name": p["a4b_rel"]},
             note="ConceptNet stores symmetric relations reciprocally", plan=True),
 
         QuerySpec(
             "A5", "A", "two-anchor intersection (join topology in the pattern)", "tie (readability: graph)",
-            sql="""SELECT loc.name AS shared
-FROM nodes a
-JOIN edges e1 ON e1.subject_id = a.node_id AND e1.relation_id = {{rel}}
-JOIN edges e2 ON e2.object_id = e1.object_id AND e2.relation_id = {{rel}}
-JOIN nodes b  ON b.node_id = e2.subject_id AND b.name = '{{anchor_b}}'
-JOIN nodes loc ON loc.node_id = e1.object_id
-WHERE a.name = '{{anchor_a}}'
-ORDER BY shared""",
-            cypher="""MATCH (a:Concept {name: '{{anchor_a}}'})-[:{{rel_name}}]->(loc:Concept)
-      <-[:{{rel_name}}]-(b:Concept {name: '{{anchor_b}}'})
-RETURN loc.name AS shared
-ORDER BY shared""",
+            sql="""
+            SELECT loc.name AS shared
+            FROM nodes a
+            JOIN edges e1 ON e1.subject_id = a.node_id AND e1.relation_id = {{rel}}
+            JOIN edges e2 ON e2.object_id = e1.object_id AND e2.relation_id = {{rel}}
+            JOIN nodes b  ON b.node_id = e2.subject_id AND b.name = '{{anchor_b}}'
+            JOIN nodes loc ON loc.node_id = e1.object_id
+            WHERE a.name = '{{anchor_a}}'
+            ORDER BY shared""",
+            cypher="""
+            MATCH (a:Concept {name: '{{anchor_a}}'})-[:{{rel_name}}]->(loc:Concept)
+                <-[:{{rel_name}}]-(b:Concept {name: '{{anchor_b}}'})
+            RETURN loc.name AS shared
+            ORDER BY shared""",
             params={"anchor_a": p["a5a"], "anchor_b": p["a5b"],
-                    "rel": REL_IDS["AtLocation"], "rel_name": p["a5_rel"]}),
+                    "rel": REL_IDS[p["a5_rel"]],   # derived, not hardcoded
+                    "rel_name": p["a5_rel"]},
+            note="FIXED: rel was hardcoded to AtLocation while rel_name "
+                 "said CapableOf — the engines answered different questions "
+                 "(caught by verification). The id is now derived from the "
+                 "relation NAME, the single source of truth"),
 
         QuerySpec(
             "A6", "A", "range selection on a sorted index", "MySQL",
-            sql="""SELECT name, node_type FROM nodes
-WHERE name BETWEEN '{{lo}}' AND '{{hi}}'
-ORDER BY name""",
-            cypher="""MATCH (n:Concept)
-WHERE n.name >= '{{lo}}' AND n.name <= '{{hi}}'
-RETURN n.name AS name, {{node_type_case}} AS node_type
-ORDER BY name""",
+            sql="""
+            SELECT name, node_type FROM nodes
+            WHERE name BETWEEN '{{lo}}' AND '{{hi}}'
+            ORDER BY name""",
+            cypher="""
+            MATCH (n:Concept)
+            WHERE n.name >= '{{lo}}' AND n.name <= '{{hi}}'
+            RETURN n.name AS name, {{node_type_case}} AS node_type
+            ORDER BY name""",
             params={"lo": p["a6lo"], "hi": p["a6hi"],
                     "node_type_case": NODE_TYPE_CASE},
             note="B+ tree: O(log B + fs*B); check PROFILE for index-vs-scan",
@@ -377,25 +455,26 @@ ORDER BY name""",
 
         QuerySpec(
             "A7", "A", "set difference (anti-join vs. negated pattern)", "near tie (readability: graph)",
-            sql="""SELECT DISTINCT s.name AS name
-FROM edges e
-JOIN nodes s ON s.node_id = e.subject_id
-JOIN nodes a ON a.node_id = e.object_id
-WHERE a.name = '{{anchor_a}}' AND e.relation_id = {{rel}}
-  AND NOT EXISTS (
-      SELECT 1 FROM edges e2
-      JOIN nodes b ON b.node_id = e2.object_id
-      WHERE e2.subject_id = e.subject_id AND e2.relation_id = {{rel}}
-        AND b.name = '{{anchor_b}}')
-ORDER BY name""",
-            cypher="""MATCH (x:Concept)-[:{{rel_name}}]->(:Concept {name: '{{anchor_a}}'})
-WHERE NOT (x)-[:{{rel_name}}]->(:Concept {name: '{{anchor_b}}'})
-RETURN DISTINCT x.name AS name
-ORDER BY name""",
+            sql="""
+            SELECT DISTINCT s.name AS name
+            FROM edges e
+            JOIN nodes s ON s.node_id = e.subject_id
+            JOIN nodes a ON a.node_id = e.object_id
+            WHERE a.name = '{{anchor_a}}' AND e.relation_id = {{rel}}
+            AND NOT EXISTS (
+                SELECT 1 FROM edges e2
+                JOIN nodes b ON b.node_id = e2.object_id
+                WHERE e2.subject_id = e.subject_id AND e2.relation_id = {{rel}}
+                    AND b.name = '{{anchor_b}}')
+            ORDER BY name""",
+            cypher="""
+            MATCH (x:Concept)-[:{{rel_name}}]->(:Concept {name: '{{anchor_a}}'})
+            WHERE NOT (x)-[:{{rel_name}}]->(:Concept {name: '{{anchor_b}}'})
+            RETURN DISTINCT x.name AS name
+            ORDER BY name""",
             params={"anchor_a": p["a7a"], "anchor_b": p["a7b"],
-                    "rel": REL_IDS["AtLocation"], "rel_name": p["a7_rel"]},
-            note="PDF form 2 (anti-join) — better for plan inspection; "
-                 "form 1 (EXCEPT) is equivalent", plan=True),
+                    "rel": REL_IDS[p["a7_rel"]], "rel_name": p["a7_rel"]},
+            note="PDF form 2 (anti-join) — better for plan inspection", plan=True),
     ]
 
     # ---------------- FAMILY B — traversal paths --------------------------
@@ -415,20 +494,22 @@ ORDER BY name""",
     specs += [
         QuerySpec(
             "B2", "B", "transitive closure (recursive CTE vs. *1..d)", "graph, modest",
-            sql="""WITH RECURSIVE anc(node_id, depth) AS (
-    SELECT node_id, 0 FROM nodes WHERE name = '{{anchor}}'
-    UNION ALL
-    SELECT e.object_id, a.depth + 1
-    FROM anc a JOIN edges e ON e.subject_id = a.node_id
-    WHERE e.relation_id = {{rel}} AND a.depth < {{maxd}}
-)
-SELECT DISTINCT n.name AS superclass
-FROM anc a JOIN nodes n ON n.node_id = a.node_id
-WHERE a.depth > 0
-ORDER BY superclass""",
-            cypher="""MATCH (:Concept {name: '{{anchor}}'})-[:{{rel_name}}*1..{{maxd}}]->(sup:Concept)
-RETURN DISTINCT sup.name AS superclass
-ORDER BY superclass""",
+            sql="""
+            WITH RECURSIVE anc(node_id, depth) AS (
+                SELECT node_id, 0 FROM nodes WHERE name = '{{anchor}}'
+                UNION ALL
+                SELECT e.object_id, a.depth + 1
+                FROM anc a JOIN edges e ON e.subject_id = a.node_id
+                WHERE e.relation_id = {{rel}} AND a.depth < {{maxd}}
+            )
+            SELECT DISTINCT n.name AS superclass
+            FROM anc a JOIN nodes n ON n.node_id = a.node_id
+            WHERE a.depth > 0
+            ORDER BY superclass""",
+            cypher="""
+            MATCH (:Concept {name: '{{anchor}}'})-[:{{rel_name}}*1..{{maxd}}]->(sup:Concept)
+            RETURN DISTINCT sup.name AS superclass
+            ORDER BY superclass""",
             params={"anchor": p["b2"], "rel": REL_IDS["IsA"],
                     "rel_name": p["b2_rel"], "maxd": B2_MAX_DEPTH},
             note="CTE needs the manual depth bound as cycle guard"),
@@ -436,37 +517,39 @@ ORDER BY superclass""",
         QuerySpec(
             "B3", "B", "shortest chain, undirected, any relation (depth-bounded)", "graph (expressiveness)",
             sql="""WITH RECURSIVE walk(node_id, depth, path) AS (
-    SELECT node_id, 0, CAST(node_id AS CHAR(2000))
-    FROM nodes WHERE name = '{{anchor_a}}'
-    UNION ALL
-    SELECT e.other_id, w.depth + 1, CONCAT(w.path, ',', e.other_id)
-    FROM walk w
-    JOIN ( SELECT subject_id AS from_id, object_id AS other_id FROM edges
-           UNION ALL
-           SELECT object_id AS from_id, subject_id AS other_id FROM edges ) e
-      ON e.from_id = w.node_id
-    WHERE w.depth < {{maxd}} AND FIND_IN_SET(e.other_id, w.path) = 0
-)
-SELECT depth AS hops FROM walk
-WHERE node_id IN (SELECT node_id FROM nodes WHERE name = '{{anchor_b}}')
-ORDER BY depth, path LIMIT 1""",
-            cypher="""MATCH p = (a:Concept {name: '{{anchor_a}}'})-[r*BFS..{{maxd}}]-(b:Concept {name: '{{anchor_b}}'})
-RETURN length(p) AS hops
-ORDER BY hops LIMIT 1""",
+                SELECT node_id, 0, CAST(node_id AS CHAR(2000))
+                FROM nodes WHERE name = '{{anchor_a}}'
+                UNION ALL
+                SELECT e.other_id, w.depth + 1, CONCAT(w.path, ',', e.other_id)
+                FROM walk w
+                JOIN ( SELECT subject_id AS from_id, object_id AS other_id FROM edges
+                    UNION ALL
+                    SELECT object_id AS from_id, subject_id AS other_id FROM edges ) e
+                ON e.from_id = w.node_id
+                WHERE w.depth < {{maxd}} AND FIND_IN_SET(e.other_id, w.path) = 0
+            )
+            SELECT depth AS hops FROM walk
+            WHERE node_id IN (SELECT node_id FROM nodes WHERE name = '{{anchor_b}}')
+            ORDER BY depth, path LIMIT 1""",
+            cypher="""
+            MATCH p = (a:Concept {name: '{{anchor_a}}'})-[r*BFS..{{maxd}}]-(b:Concept {name: '{{anchor_b}}'})
+            RETURN length(p) AS hops
+            ORDER BY hops LIMIT 1""",
             params={"anchor_a": p["b3a"], "anchor_b": p["b3b"],
                     "maxd": SP_MAX_DEPTH},
             reps=3, warmup=1,
             note="returns hops, not the path (paths contain engine ids); "
                  "*BFS explores level by level (if this build rejects "
-                 "*BFS, use *..{{maxd}}); depth is SP_MAX_DEPTH — keep "
-                 "Queries.pdf in sync with whatever you run"),
+                 "*BFS, use *..{{maxd}}); keep Queries.pdf in sync with "
+                 "the depth actually run"),
 
         QuerySpec(
             "B4", "B", "weighted path scoring — expressiveness boundary", "no SQL counterpart",
             sql=None,
-            cypher="""MATCH p = (a:Concept {name: '{{anchor_a}}'})-[r*..{{maxd}}]->(b:Concept {name: '{{anchor_b}}'})
-RETURN p, reduce(acc = 1.0, rel IN relationships(p) | acc * rel.weight) AS score
-ORDER BY score DESC LIMIT 5""",
+            cypher="""
+            MATCH p = (a:Concept {name: '{{anchor_a}}'})-[r*..{{maxd}}]->(b:Concept {name: '{{anchor_b}}'})
+            RETURN p, reduce(acc = 1.0, rel IN relationships(p) | acc * rel.weight) AS score
+            ORDER BY score DESC LIMIT 5""",
             params={"anchor_a": p["b4a"], "anchor_b": p["b4b"],
                     "maxd": SP_MAX_DEPTH},
             reps=3, warmup=1, verify=False,
@@ -475,79 +558,117 @@ ORDER BY score DESC LIMIT 5""",
 
         QuerySpec(
             "B5", "B", "anchored triangle (cyclic pattern)", "graph, clearly",
-            sql="""SELECT DISTINCT y.name AS hop1, z.name AS hop2
-FROM nodes n
-JOIN edges e1 ON e1.subject_id = n.node_id
-JOIN edges e2 ON e2.subject_id = e1.object_id
-JOIN edges e3 ON e3.subject_id = e2.object_id
-WHERE n.name = '{{anchor}}' AND e3.object_id = n.node_id
-ORDER BY hop1, hop2 LIMIT 200""",
-            cypher="""MATCH (a:Concept {name: '{{anchor}}'})-[]->(y:Concept)-[]->(z:Concept)-[]->(a)
-RETURN DISTINCT y.name AS hop1, z.name AS hop2
-ORDER BY hop1, hop2 LIMIT 200""",
+            sql="""
+            SELECT DISTINCT y.uri AS hop1_uri, y.name AS hop1, z.uri AS hop2_uri, z.name AS hop2
+            FROM nodes n
+            JOIN edges e1 ON e1.subject_id = n.node_id
+            JOIN nodes y  ON y.node_id  = e1.object_id
+            JOIN edges e2 ON e2.subject_id = y.node_id
+            JOIN nodes z  ON z.node_id  = e2.object_id
+            JOIN edges e3 ON e3.subject_id = z.node_id
+            WHERE n.name = '{{anchor}}' AND e3.object_id = n.node_id
+            AND e1.edge_id <> e2.edge_id
+            AND e1.edge_id <> e3.edge_id
+            AND e2.edge_id <> e3.edge_id
+            ORDER BY hop1, hop2, hop1_uri, hop2_uri LIMIT 200""",
+            cypher="""
+            MATCH (a:Concept {name: '{{anchor}}'})-[]->(y:Concept)-[]->(z:Concept)-[]->(a)
+            RETURN DISTINCT y.uri AS hop1_uri, y.name AS hop1, z.uri AS hop2_uri, z.name AS hop2
+            ORDER BY hop1, hop2, hop1_uri, hop2_uri LIMIT 200""",
             params={"anchor": p["b5"]}, reps=5,
-            note="hub-sensitive: mid-degree anchor; LIMIT 200 + ORDER BY "
-                 "added to the PDF text for determinism and safety",
+            note="SQL: edge-distinctness aligns with Cypher's relationship "
+                 "uniqueness (self-loops are SQL-only degenerate triangles); "
+                 "Cypher: DISTINCT dedups multi-sense anchors where multiple "
+                 "paths reach the same (hop1, hop2) pair; both sides keyed "
+                 "by URI against sense-level name collisions",
             plan=True),
 
         QuerySpec(
             "B6", "B", "traversal feeding aggregation (bags vs sets!)", "graph, moderate",
-            sql="""SELECT nbr.name AS name, COUNT(DISTINCT e2.edge_id) AS out_degree
-FROM nodes n
-JOIN edges e1 ON e1.subject_id = n.node_id
-JOIN edges e2 ON e2.subject_id = e1.object_id
-JOIN nodes nbr ON nbr.node_id = e1.object_id
-WHERE n.name = '{{anchor}}'
-GROUP BY nbr.node_id, nbr.name
-ORDER BY out_degree DESC, name LIMIT 50""",
-            cypher="""MATCH (:Concept {name: '{{anchor}}'})-[]->(nbr:Concept)-[r2]->()
-RETURN nbr.name AS name, count(DISTINCT r2) AS out_degree
-ORDER BY out_degree DESC, name LIMIT 50""",
+            sql="""
+            SELECT nbr.uri AS uri, nbr.name AS name, COUNT(DISTINCT e2.edge_id) AS out_degree
+            FROM nodes n
+            JOIN edges e1 ON e1.subject_id = n.node_id
+            JOIN edges e2 ON e2.subject_id = e1.object_id
+            JOIN nodes nbr ON nbr.node_id = e1.object_id
+            WHERE n.name = '{{anchor}}' AND e1.edge_id <> e2.edge_id
+            GROUP BY nbr.uri, nbr.name
+            ORDER BY out_degree DESC, uri LIMIT 50""",
+            cypher="""
+            MATCH (:Concept {name: '{{anchor}}'})-[]->(nbr:Concept)-[r2]->()
+            RETURN nbr.uri AS uri, nbr.name AS name, count(DISTINCT r2) AS out_degree
+            ORDER BY out_degree DESC, uri LIMIT 50""",
             params={"anchor": p["b6"]},
-            note="COUNT(DISTINCT) on both sides: the anchor->neighbor "
-                 "join is a bag; LIMIT 50 added for safety",
+            note="FIXED: SQL grouped per node (per sense) while Cypher "
+                 "grouped by name (merging senses) — the C1 ambiguity in "
+                 "aggregation form. Both sides now group and tiebreak by "
+                 "URI; e1<>e2 encodes Cypher relationship uniqueness",
             plan=True),
 
         # ---------------- FAMILY C — global retrieval ----------------------
         QuerySpec(
             "C1", "C", "hub ranking (full scan + one-pass grouping)", "MySQL",
-            sql="""SELECT n.uri, n.name, COUNT(*) AS out_degree
-FROM edges e JOIN nodes n ON n.node_id = e.subject_id
-GROUP BY n.uri, n.name
-ORDER BY out_degree DESC LIMIT 10;""",
-            cypher="""MATCH (n:Concept)-[r]->(:Concept)
-RETURN n.uri AS uri, n.name AS name, count(r) AS out_degree
-ORDER BY out_degree DESC, uri LIMIT 10;""",
-            plan=True, note="the honest pro-SQL row"),
+            sql="""
+            SELECT n.uri AS uri, n.name AS name, COUNT(*) AS out_degree
+            FROM edges e JOIN nodes n ON n.node_id = e.subject_id
+            GROUP BY n.uri, n.name
+            ORDER BY out_degree DESC, uri LIMIT 10""",
+            cypher="""
+            MATCH (n:Concept)-[r]->(:Concept)
+            RETURN n.uri AS uri, n.name AS name, count(r) AS out_degree
+            ORDER BY out_degree DESC, uri LIMIT 10""",
+            plan=True,
+            note="grouped and tie-broken by URI (the identity): names are "
+                 "not unique at sense level, so name-level top-10 is "
+                 "ambiguous and legitimately differs across systems — "
+                 "the first C1 MISMATCH was exactly that"),
 
         QuerySpec(
             "C2", "C", "stored vs. derived grouping key (relation x class)", "either — trade-off is the finding",
-            sql="""SELECT r.relation_name AS relation, e.edge_class AS edge_class,
-       COUNT(*) AS n_edges, ROUND(AVG(e.weight), 4) AS avg_w
-FROM edges e JOIN relations r ON r.relation_id = e.relation_id
-GROUP BY r.relation_name, e.edge_class
-ORDER BY n_edges DESC, relation, edge_class""",
-            cypher="""MATCH (s:Concept)-[r]->(o:Concept)
-RETURN type(r) AS relation,
-       (CASE WHEN s:EntityNode THEN 'E' WHEN s:ActionEventNode THEN 'A' ELSE 'P' END) + '2' +
-       (CASE WHEN o:EntityNode THEN 'E' WHEN o:ActionEventNode THEN 'A' ELSE 'P' END) AS edge_class,
-       count(r) AS n_edges, round(avg(r.weight), 4) AS avg_w
-ORDER BY n_edges DESC, relation, edge_class""",
-            plan=True, note="output = the table behind Lab's schema view"),
+            sql="""
+            SELECT r.relation_name AS relation, e.edge_class AS edge_class,
+                COUNT(*) AS n_edges, AVG(e.weight) AS avg_w
+            FROM edges e JOIN relations r ON r.relation_id = e.relation_id
+            GROUP BY r.relation_name, e.edge_class
+            ORDER BY n_edges DESC, relation, edge_class""",
+            cypher="""
+            MATCH (s:Concept)-[r]->(o:Concept)
+            RETURN type(r) AS relation,
+                (CASE WHEN s:EntityNode THEN 'E' WHEN s:ActionEventNode THEN 'A' ELSE 'P' END) + '2' +
+                (CASE WHEN o:EntityNode THEN 'E' WHEN o:ActionEventNode THEN 'A' ELSE 'P' END) AS edge_class,
+                count(r) AS n_edges, avg(r.weight) AS avg_w
+            ORDER BY n_edges DESC, relation, edge_class""",
+            plan=True,
+            note="FIXED: no round(...,4) on either side — this Memgraph "
+                 "build's round() takes exactly 1 argument; verification "
+                 "canonicalizes floats to 4 decimals anyway"),
 
         # ---------------- FAMILY D — schema and integrity -----------------
         QuerySpec(
             "D1", "D", "violation check (view vs. meta-graph anti-join)", "qualitative",
             sql="""SELECT COUNT(*) AS violations FROM v_edges WHERE NOT permitted""",
-            cypher="""MATCH (s:Concept)-[r]->(o:Concept)
-MATCH (rt:Schema:RelationType {name: type(r)})
-OPTIONAL MATCH (rt)-[:PERMITS]->(c:Schema:EdgeClass)
-    WHERE c.name = (CASE WHEN s:EntityNode THEN 'E' WHEN s:ActionEventNode THEN 'A' ELSE 'P' END) + '2' +
-               (CASE WHEN o:EntityNode THEN 'E' WHEN o:ActionEventNode THEN 'A' ELSE 'P' END)
-WITH r, c WHERE c IS NULL
-RETURN count(r) AS violations""",
-            note="expect 0 on both sides under STRICT_CONTRACT; D2/D3 are "
-                 "manual write demos by design", plan=False),
+            cypher=D1_CYPHER,
+            note="expect 0 on both sides under STRICT_CONTRACT", plan=False),
+
+        QuerySpec(
+            "D2", "D", "invalid insert: write-time enforcement vs. read-time detection",
+            "qualitative — engine vs. query",
+            kind="d2",
+            note="MySQL: (a) accepted+visible, (b) ERROR 3819 (CHECK), "
+                 "(c) ERROR 1452 (FK); Memgraph: accepted silently, then "
+                 "caught by the D1 query. verify = state signature "
+                 "(violations during/after), see WRITE DEMOS in the "
+                 "docstring"),
+
+        QuerySpec(
+            "D3", "D", "concept delete: ordering+transaction vs. atomic cascade",
+            "qualitative — referential semantics",
+            kind="d3",
+            note="MySQL: ERROR 1451 on wrong order, then children-before-"
+                 "parent in a transaction; Memgraph: one atomic DETACH "
+                 "DELETE. Deletes a harness-created demo concept (PDF "
+                 "deviation, see WRITE DEMOS). verify = state signature "
+                 "(deleted-edge parity)"),
     ]
 
     # resolve the protocol sentinels AFTER --quick/--reps have been applied
@@ -560,15 +681,30 @@ RETURN count(r) AS violations""",
 
 
 # ---------------------------------------------------------------------------
-# Runners
+# Runners (read queries)
 # ---------------------------------------------------------------------------
 
 def run_mysql(conn, sql):
-    cur = conn.cursor()
-    cur.execute(sql)
-    rows = cur.fetchall()
-    cur.close()
-    return [tuple(r) for r in rows]
+    """Execute one read-only query; reconnect once on connection errors."""
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        cur.close()
+        return [tuple(r) for r in rows]
+    except mysql.connector.Error as exc:
+        err = str(exc)
+        transient = ("server has gone away" in err
+                     or "connection" in err.lower()
+                     or "Lost connection" in err)
+        if not transient:
+            raise
+        conn.reconnect()
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+        cur.close()
+        return [tuple(r) for r in rows]
 
 
 def run_memgraph(session, cypher):
@@ -673,6 +809,383 @@ def plan_note(text):
 
 
 # ---------------------------------------------------------------------------
+# Write demos (D2 / D3) — self-cleaning, single-shot
+# ---------------------------------------------------------------------------
+
+def run_d2_mysql(conn):
+    """
+    D2 on MySQL — the three failure modes of write-time enforcement.
+    Expected errors (3819 / 1452) are recorded as OUTCOMES, not failures.
+    Idempotent setup; cleanup in finally. Returns (steps, parity, total).
+    """
+    steps = []
+
+    def timed(name, fn):
+        t0 = time.perf_counter()
+        err = None
+        try:
+            fn()
+        except mysql.connector.Error as exc:
+            err = exc
+        ms = (time.perf_counter() - t0) * 1000.0
+        steps.append({"step": name,
+                      "outcome": "ok" if err is None else f"errno {err.errno}",
+                      "ms": round(ms, 3)})
+        return err
+
+    cur = conn.cursor()
+    # Idempotent setup: strict mode guarantees NO real row has the
+    # (HasProperty, E2E) shape, so this deletes only crashed-demo leftovers.
+    cur.execute("DELETE FROM edges WHERE relation_id = 20 AND edge_class = 'E2E'")
+    cur.execute("SELECT node_id FROM nodes WHERE node_type = 'EntityNode' "
+                "ORDER BY node_id LIMIT 4")
+    ids = [r[0] for r in cur.fetchall()]
+    if len(ids) < 4:
+        cur.close()
+        raise SystemExit("D2(mysql): fewer than 4 EntityNodes found")
+    s_id, o1, o2, o3 = ids
+
+    # (a) truthful class E2E, unpermitted (HasProperty grants E2P/A2P):
+    #     ACCEPTED by the engine, visible as permitted=0 in the view.
+    # (b) lying edge_class (E2P between two Entities): CHECK 3819.
+    #     Distinct object o2 so the unique triple cannot fire first (1062).
+    # (c) lying subject_type (ActionEventNode for an EntityNode id) with a
+    #     class consistent with the LIE (A2E) so the CHECK passes and the
+    #     composite FK is what rejects: 1452.
+    ins_a = ("INSERT INTO edges (subject_id, subject_type, object_id, object_type, "
+             "relation_id, edge_class, weight) "
+             f"VALUES ({s_id}, 'EntityNode', {o1}, 'EntityNode', 20, 'E2E', 1.0)")
+    ins_b = ("INSERT INTO edges (subject_id, subject_type, object_id, object_type, "
+             "relation_id, edge_class, weight) "
+             f"VALUES ({s_id}, 'EntityNode', {o2}, 'EntityNode', 20, 'E2P', 1.0)")
+    ins_c = ("INSERT INTO edges (subject_id, subject_type, object_id, object_type, "
+             "relation_id, edge_class, weight) "
+             f"VALUES ({s_id}, 'ActionEventNode', {o3}, 'EntityNode', 20, 'A2E', 1.0)")
+
+    during = after = None
+    try:
+        e = timed("insert(a): truthful class E2E, unpermitted combo -> ACCEPTED (permitted=0)",
+                  lambda: cur.execute(ins_a))
+        if e is not None:
+            raise SystemExit(f"D2(mysql)(a) failed unexpectedly: {e}")
+
+        t0 = time.perf_counter()
+        cur.execute("SELECT COUNT(*) FROM v_edges WHERE NOT permitted")
+        during = cur.fetchone()[0]
+        steps.append({"step": "violation check: v_edges NOT permitted (read-time visibility)",
+                      "outcome": f"violations={during}",
+                      "ms": round((time.perf_counter() - t0) * 1000.0, 3)})
+        if during != 1:
+            raise SystemExit(f"D2(mysql): expected 1 violation during demo, "
+                             f"got {during} (strict mode + clean state required)")
+
+        e = timed("insert(b): lying edge_class E2P -> ERROR 3819 (CHECK chk_edges_class)",
+                  lambda: cur.execute(ins_b))
+        if e is None or e.errno != 3819:
+            raise SystemExit(f"D2(mysql)(b): expected errno 3819, got {e!r}")
+
+        e = timed("insert(c): lying subject_type -> ERROR 1452 (composite FK)",
+                  lambda: cur.execute(ins_c))
+        if e is None or e.errno != 1452:
+            raise SystemExit(f"D2(mysql)(c): expected errno 1452, got {e!r}")
+    finally:
+        # cleanup: removes exactly the demo row (a); (b)/(c) were rejected
+        cur.execute("DELETE FROM edges WHERE relation_id = 20 AND edge_class = 'E2E'")
+
+    cur.execute("SELECT COUNT(*) FROM v_edges WHERE NOT permitted")
+    after = cur.fetchone()[0]
+    cur.close()
+    if after != 0:
+        raise SystemExit(f"D2(mysql): violations after cleanup = {after}")
+
+    total = sum(st["ms"] for st in steps)
+    return steps, f"during={during};after={after}", total
+
+
+def run_d2_memgraph(session):
+    """
+    D2 on Memgraph — no write-time enforcement: the invalid edge is
+    accepted silently, and the D1 QUERY catches it. Idempotent setup;
+    cleanup in finally. Returns (steps, parity, total).
+    """
+    steps = []
+
+    def timed(name, fn):
+        t0 = time.perf_counter()
+        fn()
+        steps.append({"step": name, "outcome": "ok",
+                      "ms": round((time.perf_counter() - t0) * 1000.0, 3)})
+
+    def violations():
+        return session.run(D1_CYPHER).single()["violations"]
+
+    # idempotent setup: remove leftovers of a previous crashed demo
+    session.run("MATCH (n:Concept) WHERE n.uri IN $uris DETACH DELETE n",
+                uris=[DEMO_URI_A, DEMO_URI_B]).consume()
+    during = after = None
+    try:
+        timed("create 2 demo EntityNodes + invalid HasProperty edge -> ACCEPTED silently",
+              lambda: session.run(
+                  "CREATE (a:Concept:EntityNode {uri: $ua, name: '_demo_a', "
+                  "pos: 'n', label_source: 'uri'}), "
+                  "(b:Concept:EntityNode {uri: $ub, name: '_demo_b', "
+                  "pos: 'n', label_source: 'uri'}) "
+                  "CREATE (a)-[:HasProperty {weight: 1.0}]->(b)",
+                  ua=DEMO_URI_A, ub=DEMO_URI_B).consume())
+        t0 = time.perf_counter()
+        during = violations()
+        steps.append({"step": "violation check vs :Schema meta-graph (read-time detection)",
+                      "outcome": f"violations={during}",
+                      "ms": round((time.perf_counter() - t0) * 1000.0, 3)})
+        if during != 1:
+            raise SystemExit(f"D2(memgraph): expected 1 violation during "
+                             f"demo, got {during}")
+    finally:
+        session.run("MATCH (n:Concept) WHERE n.uri IN $uris DETACH DELETE n",
+                    uris=[DEMO_URI_A, DEMO_URI_B]).consume()
+
+    after = violations()
+    if after != 0:
+        raise SystemExit(f"D2(memgraph): violations after cleanup = {after}")
+
+    total = sum(st["ms"] for st in steps)
+    return steps, f"during={during};after={after}", total
+
+
+def run_d3_mysql(conn):
+    """
+    D3 on MySQL — delete semantics under referential integrity:
+    wrong order first (DELETE parent with children: ERROR 1451), then the
+    correct children-before-parent sequence inside a transaction.
+    Returns (steps, parity, total, target_uris) — target_uris are shared
+    with the Memgraph side so both demos delete the same-shaped data.
+    """
+    steps = []
+
+    def timed(name, fn):
+        t0 = time.perf_counter()
+        err = None
+        try:
+            fn()
+        except mysql.connector.Error as exc:
+            err = exc
+        ms = (time.perf_counter() - t0) * 1000.0
+        steps.append({"step": name,
+                      "outcome": "ok" if err is None else f"errno {err.errno}",
+                      "ms": round(ms, 3)})
+        return err
+
+    cur = conn.cursor()
+    # idempotent setup: remove leftovers of a previous crashed demo
+    cur.execute("SELECT node_id FROM nodes WHERE uri = %s", (DEMO_URI_D3,))
+    row = cur.fetchone()
+    if row:
+        cur.execute("DELETE FROM edges WHERE subject_id = %s OR object_id = %s",
+                    (row[0], row[0]))
+        cur.execute("DELETE FROM nodes WHERE node_id = %s", (row[0],))
+
+    # create the demo concept + 3 RelatedTo edges (wildcard -> E2E permitted)
+    cur.execute("SELECT MAX(node_id) FROM nodes")
+    demo_id = cur.fetchone()[0] + 1
+    cur.execute("INSERT INTO nodes (node_id, uri, name, pos, node_type, "
+                "label_source) VALUES (%s, %s, '_bench_d3', 'n', "
+                "'EntityNode', 'uri')", (demo_id, DEMO_URI_D3))
+    cur.execute("SELECT node_id, uri FROM nodes WHERE node_type = 'EntityNode' "
+                "AND uri <> %s ORDER BY node_id LIMIT 3", (DEMO_URI_D3,))
+    targets = cur.fetchall()
+    if len(targets) != 3:
+        cur.close()
+        raise SystemExit("D3(mysql): could not find 3 EntityNode targets")
+    for t_id, _uri in targets:
+        cur.execute("INSERT INTO edges (subject_id, subject_type, object_id, "
+                    "object_type, relation_id, edge_class, weight) "
+                    "VALUES (%s, 'EntityNode', %s, 'EntityNode', 33, 'E2E', 1.0)",
+                    (demo_id, t_id))
+    target_uris = [t[1] for t in targets]
+
+    deleted = 0
+
+    def correct_order():
+        cur.execute("START TRANSACTION")
+        cur.execute("DELETE FROM edges WHERE subject_id = %s OR object_id = %s",
+                    (demo_id, demo_id))
+        nonlocal deleted
+        deleted = cur.rowcount
+        cur.execute("DELETE FROM nodes WHERE node_id = %s", (demo_id,))
+        cur.execute("COMMIT")
+
+    try:
+        e = timed("wrong order: DELETE parent with children present -> ERROR 1451",
+                  lambda: cur.execute("DELETE FROM nodes WHERE node_id = %s",
+                                      (demo_id,)))
+        if e is None or e.errno != 1451:
+            raise SystemExit(f"D3(mysql): expected errno 1451, got {e!r}")
+
+        e = timed("correct order: tx { DELETE children; DELETE parent; COMMIT }",
+                  correct_order)
+        if e is not None:
+            raise SystemExit(f"D3(mysql): correct-order delete failed: {e}")
+        if deleted != 3:
+            raise SystemExit(f"D3(mysql): expected to delete 3 edges, got {deleted}")
+    finally:
+        # emergency cleanup (no-op on success; rescues a mid-demo failure)
+        try:
+            conn.rollback()          # no-op unless a demo tx is still open
+        except Exception:
+            pass
+        cur.execute("DELETE FROM edges WHERE subject_id = %s OR object_id = %s",
+                    (demo_id, demo_id))
+        cur.execute("DELETE FROM nodes WHERE node_id = %s", (demo_id,))
+
+    cur.close()
+    total = sum(st["ms"] for st in steps)
+    return steps, f"deleted_edges={deleted}", total, target_uris
+
+
+def run_d3_memgraph(session, target_uris=None):
+    """
+    D3 on Memgraph — one atomic DETACH DELETE (the engine cascades the
+    incident edges itself; no ordering to get wrong, nothing to roll back).
+    Returns (steps, parity, total, target_uris).
+    """
+    steps = []
+
+    def timed(name, fn):
+        t0 = time.perf_counter()
+        fn()
+        steps.append({"step": name, "outcome": "ok",
+                      "ms": round((time.perf_counter() - t0) * 1000.0, 3)})
+
+    # idempotent setup
+    session.run("MATCH (n:Concept {uri: $u}) DETACH DELETE n",
+                u=DEMO_URI_D3).consume()
+    if not target_uris:
+        target_uris = [r["uri"] for r in session.run(
+            "MATCH (t:Concept:EntityNode) WHERE t.uri <> $u "
+            "RETURN t.uri AS uri LIMIT 3", u=DEMO_URI_D3)]
+    if len(target_uris) != 3:
+        raise SystemExit("D3(memgraph): could not find 3 EntityNode targets")
+
+    session.run("CREATE (d:Concept:EntityNode {uri: $u, name: '_bench_d3', "
+                "pos: 'n', label_source: 'uri'}) "
+                "WITH d MATCH (t:Concept) WHERE t.uri IN $targets "
+                "CREATE (d)-[:RelatedTo {weight: 1.0}]->(t)",
+                u=DEMO_URI_D3, targets=target_uris).consume()
+
+    deleted = session.run("MATCH (n:Concept {uri: $u})-[r]->() "
+                          "RETURN count(r) AS c", u=DEMO_URI_D3).single()["c"]
+    steps.append({"step": "count demo edges (pre-delete)",
+                  "outcome": f"edges={deleted}", "ms": 0.0})
+    if deleted != 3:
+        raise SystemExit(f"D3(memgraph): expected 3 demo edges, got {deleted}")
+
+    try:
+        timed("DETACH DELETE — single atomic cascade",
+              lambda: session.run("MATCH (n:Concept {uri: $u}) DETACH DELETE n",
+                                  u=DEMO_URI_D3).consume())
+    finally:
+        session.run("MATCH (n:Concept {uri: $u}) DETACH DELETE n",
+                    u=DEMO_URI_D3).consume()
+
+    gone = session.run("MATCH (n:Concept {uri: $u}) RETURN count(n) AS c",
+                       u=DEMO_URI_D3).single()["c"]
+    if gone != 0:
+        raise SystemExit("D3(memgraph): demo node survived deletion")
+
+    total = sum(st["ms"] for st in steps)
+    return steps, f"deleted_edges={deleted}", total, target_uris
+
+
+def _append_write_entry(results, spec, system, steps, parity, total):
+    results.append({
+        "query": spec.qid, "family": spec.family,
+        "mechanism": spec.mechanism, "expected": spec.expected,
+        "system": system, "anchor": "",
+        "median_ms": round(total, 3), "min_ms": round(total, 3),
+        "max_ms": round(total, 3), "mean_ms": round(total, 3),
+        "stdev_ms": 0.0, "reps": 1,
+        "rows": len(steps), "loc": 0, "chars": 0,
+        "verify": parity,                 # state signature — compared as-is
+        "raw_ms": [round(total, 3)],
+        "steps": steps,
+    })
+
+
+def run_write_demo(spec, conn, session, want_mysql, want_memgraph, results):
+    """Dispatch D2/D3 to the per-system handlers; record state signatures."""
+    if spec.kind == "d2":
+        if want_mysql:
+            try:
+                steps, parity, total = run_d2_mysql(conn)
+                _append_write_entry(results, spec, "mysql", steps, parity, total)
+                print(f"    {'mysql':<9} scenario {total:>10.2f} ms   "
+                      f"steps {len(steps):>3}   parity {parity}")
+            except Exception as exc:
+                print(f"    mysql: FAILED — {exc}")
+                results.append({"query": spec.qid, "system": "mysql",
+                                "error": str(exc), "family": spec.family,
+                                "mechanism": spec.mechanism,
+                                "expected": spec.expected})
+        if want_memgraph:
+            try:
+                steps, parity, total = run_d2_memgraph(session)
+                _append_write_entry(results, spec, "memgraph", steps, parity, total)
+                print(f"    {'memgraph':<9} scenario {total:>10.2f} ms   "
+                      f"steps {len(steps):>3}   parity {parity}")
+            except Exception as exc:
+                print(f"    memgraph: FAILED — {exc}")
+                results.append({"query": spec.qid, "system": "memgraph",
+                                "error": str(exc), "family": spec.family,
+                                "mechanism": spec.mechanism,
+                                "expected": spec.expected})
+
+    elif spec.kind == "d3":
+        target_uris = None
+        if want_mysql:
+            try:
+                steps, parity, total, target_uris = run_d3_mysql(conn)
+                _append_write_entry(results, spec, "mysql", steps, parity, total)
+                print(f"    {'mysql':<9} scenario {total:>10.2f} ms   "
+                      f"steps {len(steps):>3}   parity {parity}")
+            except Exception as exc:
+                print(f"    mysql: FAILED — {exc}")
+                results.append({"query": spec.qid, "system": "mysql",
+                                "error": str(exc), "family": spec.family,
+                                "mechanism": spec.mechanism,
+                                "expected": spec.expected})
+        if want_memgraph:
+            try:
+                steps, parity, total, _ = run_d3_memgraph(session, target_uris)
+                _append_write_entry(results, spec, "memgraph", steps, parity, total)
+                print(f"    {'memgraph':<9} scenario {total:>10.2f} ms   "
+                      f"steps {len(steps):>3}   parity {parity}")
+            except Exception as exc:
+                print(f"    memgraph: FAILED — {exc}")
+                results.append({"query": spec.qid, "system": "memgraph",
+                                "error": str(exc), "family": spec.family,
+                                "mechanism": spec.mechanism,
+                                "expected": spec.expected})
+
+
+def state_counts(conn, session, want_mysql, want_memgraph):
+    """Concept-scoped node/edge counts per system (for the demo state check)."""
+    out = {}
+    if want_mysql:
+        cur = conn.cursor()
+        cur.execute("SELECT (SELECT COUNT(*) FROM nodes), "
+                    "(SELECT COUNT(*) FROM edges)")
+        n, e = cur.fetchone()
+        cur.close()
+        out["mysql"] = {"nodes": n, "edges": e}
+    if want_memgraph:
+        n = session.run("MATCH (n:Concept) RETURN count(n) AS c").single()["c"]
+        e = session.run("MATCH (:Concept)-[r]->(:Concept) "
+                        "RETURN count(r) AS c").single()["c"]
+        out["memgraph"] = {"nodes": n, "edges": e}
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Environment / anchors / storage
 # ---------------------------------------------------------------------------
 
@@ -721,8 +1234,7 @@ def anchor_prep(conn):
     """
     Existence + out-degree of every anchor used by the battery.
     URI anchors (values starting with '/c/') are checked against
-    nodes.uri; name anchors against nodes.name. Out-degrees are computed
-    for names only (they feed --stratify-b1 and the report's degree table).
+    nodes.uri; name anchors against nodes.name.
     """
     values = sorted({v for k, v in ANCHORS.items()
                      if not k.endswith("_rel")})
@@ -730,11 +1242,11 @@ def anchor_prep(conn):
     names = [v for v in values if not v.startswith("/c/")]
     cur = conn.cursor()
     present = set()
+    degrees = {}
     if uris:
         fmt = ",".join(["%s"] * len(uris))
         cur.execute(f"SELECT uri FROM nodes WHERE uri IN ({fmt})", uris)
         present |= {r[0] for r in cur.fetchall()}
-    degrees = {}
     if names:
         fmt = ",".join(["%s"] * len(names))
         cur.execute(f"SELECT name FROM nodes WHERE name IN ({fmt})", names)
@@ -852,7 +1364,8 @@ def write_outputs(out_dir, results, specs, env, storage, anchors_info):
     lines.append(f"* generated: {env.get('date')}")
     lines.append(f"* protocol: {env.get('warmup')} warm-up runs discarded, "
                  f"{env.get('reps')} measured, median reported; "
-                 f"shortest-path depth (B3/B4) = {env.get('sp_depth')}")
+                 f"shortest-path depth (B3/B4) = {env.get('sp_depth')}; "
+                 f"D2/D3 are single-shot write demos (state signatures)")
     lines.append(f"* MySQL {env.get('mysql_version')} "
                  f"(buffer pool {env.get('innodb_buffer_pool_mb', '?')} MB, warm) · "
                  f"Memgraph {env.get('memgraph_version')} (in-RAM)")
@@ -893,6 +1406,14 @@ def write_outputs(out_dir, results, specs, env, storage, anchors_info):
             if cy_err:
                 errs.append("CYPHER: " + str(cy.get("error"))[:60])
             verify = " ; ".join(errs)
+        elif spec.kind != "read":
+            # write demos: verify is the state-signature parity
+            if sq and cy and sq.get("verify") is not None:
+                verify = ("OK " + sq["verify"]
+                          if sq["verify"] == cy.get("verify")
+                          else f"MISMATCH({sq.get('verify')} vs {cy.get('verify')})")
+            else:
+                verify = "n/a"
         elif sq and cy and sq.get("verify") is not None:
             verify = "OK" if sq["verify"] == cy["verify"] else "MISMATCH(!)"
         else:
@@ -907,16 +1428,42 @@ def write_outputs(out_dir, results, specs, env, storage, anchors_info):
             f"{verify} | {locs}/{locc} | {plan} |")
     lines.append("")
 
+    # write-demo step detail (the demos' results ARE their step sequences)
+    demo_q = [q for q in ("D2", "D3") if q in by_q]
+    if demo_q:
+        lines.append("## Write demos (D2/D3) — step detail\n")
+        for q in demo_q:
+            for system, r in sorted(by_q[q].items()):
+                lines.append(f"**{q} / {system}** (parity: {r.get('verify')})\n")
+                if "steps" in r:
+                    lines.append("| step | outcome | ms |")
+                    lines.append("|---|---|---|")
+                    for st in r["steps"]:
+                        lines.append(f"| {st['step']} | {st['outcome']} | "
+                                     f"{st['ms']:.3f} |")
+                elif "error" in r:
+                    lines.append(f"FAILED: {r['error']}")
+                lines.append("")
+
     mism = [q for q, d in by_q.items()
             if d.get("mysql", {}).get("verify") is not None
             and d.get("memgraph", {}).get("verify") is not None
             and d["mysql"]["verify"] != d["memgraph"]["verify"]]
     lines.append("## Verification\n")
-    lines.append("* result sets are canonicalized (sorted, floats rounded to 4) "
-                 "and compared by hash across systems."
+    lines.append("* read queries: result sets are canonicalized (sorted, floats "
+                 "rounded to 4) and compared by hash across systems; write "
+                 "demos: state signatures (violations during/after, deleted "
+                 "edges) must match."
                  + ("** All matched.**" if not mism else
                     f"** MISMATCH on: {', '.join(mism)} — investigate before "
                     f"trusting any timing.**") + "\n")
+
+    wds = env.get("write_demo_state")
+    if wds:
+        lines.append("## Write-demo state check\n")
+        lines.append("```json")
+        lines.append(json.dumps(wds, indent=2, default=json_default))
+        lines.append("```\n")
 
     lines.append("## Storage\n")
     lines.append("```json")
@@ -931,8 +1478,11 @@ def write_outputs(out_dir, results, specs, env, storage, anchors_info):
     lines.append("* A4a tie means SQL *prepaid* for it (ix_obj); A6/B1 plans: "
                  "look for 'range'/'ref' vs 'ScanAll'.")
     lines.append("* C1 is expected to favor SQL — it keeps the table honest.")
-    lines.append("* D1 is qualitative: both 0 under STRICT_CONTRACT; D2/D3 "
-                 "(write demos) are manual by design.\n")
+    lines.append("* D1 is qualitative: both 0 under STRICT_CONTRACT. D2/D3 are "
+                 "write demos: the engines are SUPPOSED to disagree on the "
+                 "write outcome (3819/1452/1451 vs. silent accept) — the "
+                 "verification compares the shared state signatures, and the "
+                 "step tables above are the reportable result.\n")
 
     with open(os.path.join(out_dir, "benchmark_report.md"), "w",
               encoding="utf-8") as f:
@@ -957,6 +1507,11 @@ def write_outputs(out_dir, results, specs, env, storage, anchors_info):
             rows = cy.get("rows") if cy else "—"
         if sql_err or cy_err:
             verify = "ERROR"
+        elif spec.kind != "read":
+            if sq and cy and sq.get("verify") is not None:
+                verify = "OK" if sq["verify"] == cy.get("verify") else "MISMATCH"
+            else:
+                verify = "n/a"
         elif sq and cy and sq.get("verify") is not None:
             verify = "OK" if sq["verify"] == cy["verify"] else "MISMATCH"
         else:
@@ -982,9 +1537,10 @@ def main():
     ap.add_argument("--warmup", type=int, default=WARMUP)
     ap.add_argument("--quick", action="store_true", help="3 reps, 1 warm-up")
     ap.add_argument("--sp-depth", type=int, default=SP_MAX_DEPTH,
-                    help="depth bound for B3/B4 (shortest-path family); "
-                         "default 3 — raising it re-enters the exponential "
-                         "regime that froze Docker at depth 5")
+                    help="depth bound for B3/B4; default 3 — higher re-enters "
+                         "the exponential regime that froze Docker at 5")
+    ap.add_argument("--no-write-demos", action="store_true",
+                    help="skip D2/D3 (pure read-only battery)")
     ap.add_argument("--queries", default=None, help="comma-separated qids")
     ap.add_argument("--out-dir", default=OUT_DIR)
     ap.add_argument("--mysql-only", action="store_true")
@@ -1014,6 +1570,10 @@ def main():
         driver.verify_connectivity()
         session = driver.session()
 
+    # pre-demo state (read queries never mutate, so this equals the
+    # pre-D2 state; the write demos must return the stores to exactly it)
+    pre_state = state_counts(conn, session, want_mysql, want_memgraph)
+
     # --- environment, anchors, specs ---------------------------------------
     env = collect_env(conn if want_mysql else _NullConn(),
                       session if want_memgraph else _NullSession())
@@ -1031,6 +1591,8 @@ def main():
             print(f"[INFO] B1 stratified anchors: {b1_anchors}")
 
     specs = build_specs(stratify_b1=args.stratify_b1, b1_anchors=b1_anchors)
+    if args.no_write_demos or not RUN_WRITE_DEMOS:
+        specs = [s for s in specs if s.kind == "read"]
     if args.queries:
         keep = {q.strip() for q in args.queries.split(",")}
         specs = [s for s in specs
@@ -1055,10 +1617,24 @@ def main():
     results = []
     print(f"\nRunning {len(runnable)} queries "
           f"(warmup={WARMUP}, reps={REPS}, sp_depth={SP_MAX_DEPTH}, "
-          f"plans={'on' if not args.no_plans else 'off'})\n")
+          f"plans={'on' if not args.no_plans else 'off'}, "
+          f"write_demos={'on' if any(s.kind != 'read' for s in runnable) else 'off'})\n")
 
     for spec in runnable:
         print(f"[{spec.qid}] {spec.mechanism} ...", flush=True)
+
+        # ---- write demos: dedicated path, single-shot, self-cleaning ----
+        if spec.kind != "read":
+            run_write_demo(spec, conn, session, want_mysql, want_memgraph,
+                           results)
+            write_outputs(args.out_dir, results, runnable, env,
+                          collect_storage(conn, session)
+                          if (want_mysql and want_memgraph) else {},
+                          {"present": sorted(present), "degrees": degrees,
+                           "missing": missing})
+            continue
+
+        # ---- read queries: warm-up + reps, verified ----------------------
         spec_rows = []
         for system in ("mysql", "memgraph"):
             if system == "mysql" and not (want_mysql and spec.sql):
@@ -1123,6 +1699,24 @@ def main():
                       if (want_mysql and want_memgraph) else {},
                       {"present": sorted(present), "degrees": degrees,
                        "missing": missing})
+
+    # --- write-demo state check: stores must be back to the pre-demo state
+    post_state = state_counts(conn, session, want_mysql, want_memgraph)
+    if pre_state or post_state:
+        ok = pre_state == post_state
+        env["write_demo_state"] = {"before": pre_state, "after": post_state,
+                                   "ok": ok}
+        if ok:
+            print("\nwrite-demo state check: OK — both stores restored to "
+                  "pre-demo counts (MySQL AUTO_INCREMENT keeps a gap; "
+                  "reload with build_mysql.py to reset it)")
+        else:
+            print("\n[WARN] write-demo state check FAILED — counts differ "
+                  "from the pre-demo snapshot:")
+            print(f"    before: {pre_state}")
+            print(f"    after:  {post_state}")
+            print("    (a crashed earlier demo may have been cleaned, "
+                  "changing counts; re-run both loaders for a pristine state)")
 
     write_outputs(args.out_dir, results, runnable, env,
                   collect_storage(conn, session)

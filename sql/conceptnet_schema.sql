@@ -14,16 +14,22 @@
 --
 -- CLASS-PARTITION NOTE (design decision, post-incident): the 3x3 endpoint
 -- type partition is COMPLETE BY DESIGN. Classes with zero population in a
--- given slice (P2P, P2E, P2A here — the load log realizes 35 relations,
--- PropertyOf among the absent ones) are empirical findings that query C2
--- reports, not redundancy. Removing "empty" classes desynchronizes the
+-- given slice (P2P, P2E, P2A, A2E here) are empirical findings that query
+-- C2 reports, not redundancy. Removing "empty" classes desynchronizes the
 -- contract's five materializations (dict, CSV, relation_edge_classes,
 -- relation_class_perms, :Schema meta-graph) and produces phantom
 -- violations in v_edges (61,416 in the incident of record). Don't.
 --
+-- RELATION-VOCABULARY NOTE: ConceptNet 5.7's documented relation list
+-- includes PropertyOf and LocationOf, but neither is materialized in the
+-- assertions dump (verified by zgrep against the full dump and by the
+-- load logs: zero edges realize them). Both were removed from the
+-- contract after verification. Classes P2E/P2A remain in the partition
+-- as permitted-but-unmapped, mirroring A2E.
+--
 -- Companion artifacts (keep in sync):
 --   * label_concepts.py — its RELATION_TO_EDGE_CLASSES must match the
---     relation_edge_classes seed below (44 grants over 40 relations);
+--     relation_edge_classes seed below (41 grants over 38 relations);
 --     its typing rule matches chk_nodes_pos_type; its output columns
 --     match the loader contract:
 --       typed_nodes.csv : uri, name, pos, node_type, label_source
@@ -70,8 +76,9 @@ INSERT INTO label_sources (label_source) VALUES
     ('uri'), ('conceptnet_dump'), ('conceptnet_api'),
     ('spacy'), ('nltk'), ('wordnet'), ('heuristic');
 
--- Relation IDs 1..38 follow relations.csv verbatim; 39..40 are the two
--- extra relations present in label_concepts.py's static schema.
+-- Relation IDs 1..38 follow relations.csv verbatim. PropertyOf and
+-- LocationOf (the documented-vocabulary extras) were removed after dump
+-- verification — see the RELATION-VOCABULARY NOTE above.
 CREATE TABLE relations (
     relation_id   INT         NOT NULL PRIMARY KEY,
     relation_name VARCHAR(64) NOT NULL,
@@ -114,7 +121,8 @@ INSERT INTO edge_classes (edge_class, subject_type, object_type) VALUES
     ('A2E','ActionEventNode','EntityNode'),      -- zero-population in this slice
     ('ALL',NULL,NULL);
 
--- MUST match RELATION_TO_EDGE_CLASSES in label_concepts.py (44 rows).
+-- MUST match RELATION_TO_EDGE_CLASSES in label_concepts.py (41 rows over
+-- 38 relations: 31 specific grants + 10 wildcards).
 CREATE TABLE relation_edge_classes (
     relation_id INT        NOT NULL,
     edge_class  VARCHAR(4) NOT NULL,
@@ -136,13 +144,10 @@ INSERT INTO relation_edge_classes (relation_id, edge_class) VALUES
     (25,'E2E'),   -- MadeOf
     (31,'E2E'),   -- PartOf
     (35,'E2E'),   -- SymbolOf
-    (39,'E2E'),   -- LocationOf
     -- E2P / A2P
     ( 7,'E2E'),( 7,'E2P'),   -- DefinedAs
     (20,'E2P'),(20,'A2P'),   -- HasProperty
     (30,'E2P'),(30,'A2P'),   -- NotHasProperty
-    -- P2E / P2A
-    (40,'P2E'),(40,'P2A'),   -- PropertyOf
     -- E2A
     ( 3,'E2A'),   -- CapableOf
     ( 6,'E2A'),   -- CreatedBy
@@ -172,13 +177,12 @@ INSERT INTO relation_edge_classes (relation_id, edge_class) VALUES
     (38,'ALL');   -- dbpedia
 
 -- The ALL wildcard EXPANDED into the 9 concrete classes, unioned with the
--- specific grants: 10 wildcards x 9 + 34 specific = 124 rows expected.
+-- specific grants: 10 wildcards x 9 + 31 specific = 121 rows expected.
 -- This is the lookup/enforcement target for `permitted` (what v_edges
--- reads); the expansion itself is a small set-based SQL demo worth showing
--- in the report. NOTE: built ONCE here, at schema-creation time — this is
--- the table whose staleness caused the 61,416 phantom violations, which is
--- why build_mysql.py now verifies it against relation_edge_classes at every
--- startup (check_perms_expansion).
+-- reads). NOTE: built ONCE here, at schema-creation time — this is the
+-- table whose staleness caused the 61,416 phantom violations, which is
+-- why build_mysql.py now verifies it against relation_edge_classes at
+-- every startup (check_perms_expansion).
 CREATE TABLE relation_class_perms (
     relation_id INT        NOT NULL,
     edge_class  VARCHAR(4) NOT NULL,
